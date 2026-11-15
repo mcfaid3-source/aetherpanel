@@ -1,0 +1,1 @@
+curl -fsSL https://raw.githubusercontent.com/mcfaid3-source/aetherpanel/main/install.sh | sudo bash -s -- --panel --yes

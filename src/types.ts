@@ -281,6 +281,15 @@ export interface Server {
   uptimeSeconds: number;
   playerCount?: number;
   maxPlayers?: number;
+  customDomain?: string;
+  domainVerified?: boolean;
+  domainLastVerifiedAt?: string;
+  autoPublishStatus?: 'idle' | 'waiting_dns' | 'live' | 'partial' | 'action_required';
+  autoPublishMessage?: string;
+  cloudflareSynced?: boolean;
+  playitEnabled?: boolean;
+  playitAddress?: string;
+  playitUpdatedAt?: string;
 }
 
 export interface ServerSubuser {
@@ -704,6 +713,38 @@ export interface AdminSectionBackgroundSettings {
   presetId?: string;
 }
 
+export interface DomainConnectionSettings {
+  panelDomain: string;
+  gameDomain: string;
+  enforceHttps: boolean;
+  reverseProxyMode: 'caddy' | 'nginx' | 'cloudflare' | 'direct';
+  verified: boolean;
+  lastVerifiedAt?: string;
+  lastResolvedIp?: string;
+  autoPublish?: boolean;
+  cloudflareApiToken?: string;
+  hasCloudflareToken?: boolean;
+  cloudflareProxied?: boolean;
+  autoStatus?: 'idle' | 'provisioning' | 'waiting_dns' | 'live' | 'partial' | 'action_required';
+  autoMessage?: string;
+  proxyApplied?: boolean;
+  proxyBackend?: 'caddy' | 'nginx' | 'cloudflare' | 'direct' | 'none';
+  publicUrl?: string;
+  lastAutoRunAt?: string;
+}
+
+export interface PlayitTunnelSettings {
+  enabled: boolean;
+  publicAddress: string;
+  agentSecretKey?: string;
+  claimUrl?: string;
+  autoStartAgent: boolean;
+  targetPort: number;
+  protocol: 'tcp' | 'udp' | 'both';
+  notes?: string;
+  updatedAt?: string;
+}
+
 export interface AntiAbuseSettings {
   enabled: boolean;
   provider: 'proxycheck' | 'ipqualityscore' | 'custom';
@@ -779,6 +820,8 @@ export interface SystemSettings {
   authProviders?: AuthProviderSettings;
   themeSettings?: CustomThemeSettings;
   adminSectionBackground?: AdminSectionBackgroundSettings;
+  domainConfig?: DomainConnectionSettings;
+  playitConfig?: PlayitTunnelSettings;
   antiAbuse?: AntiAbuseSettings;
   pageAnimationsEnabled?: boolean;
   animationSettings?: AnimationSettings;

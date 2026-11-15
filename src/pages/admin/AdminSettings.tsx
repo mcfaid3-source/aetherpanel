@@ -4,14 +4,15 @@ import {
   XCircle, Clock, AlertCircle, RefreshCw, GitBranch, ArrowUpCircle,
   Terminal, ShieldCheck, Cpu, HardDrive, Sparkles, Loader2, CheckCircle,
   AlertTriangle, HelpCircle, Key, Lock, Shield, Globe, ExternalLink, Copy,
-  Database, Plus, Trash2, Edit3, X, Disc as DiscordIcon, Twitter, Github, Share2, Coins, Mail
+  Database, Plus, Trash2, Edit3, X, Disc as DiscordIcon, Twitter, Github, Share2, Coins, Mail, Radio
 } from 'lucide-react';
 import { apiRequest } from '../../lib/api';
 import { useBranding } from '../../lib/BrandingContext';
+import { AdminDomainAndPlayitSection } from '../../components/admin/AdminDomainAndPlayitSection';
 import { Order, PaymentGatewaySettings, PanelVersionInfo, UpdateJobState, AuthProviderSettings, DatabaseHost, SocialLinks, NetworkProtectionStatus } from '../../types';
 
 export const AdminSettings: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'general' | 'auth' | 'security' | 'payments' | 'pending' | 'updates' | 'network_sftp' | 'databases' | 'network_protection'>('general');
+  const [activeTab, setActiveTab] = useState<'general' | 'auth' | 'security' | 'payments' | 'pending' | 'updates' | 'network_sftp' | 'domains_playit' | 'databases' | 'network_protection'>('general');
 
   // Network Protection States
   const [netProtectStatus, setNetProtectStatus] = useState<NetworkProtectionStatus | null>(null);
@@ -695,6 +696,12 @@ export const AdminSettings: React.FC = () => {
             className={`px-3.5 py-2 rounded-xl transition-all flex items-center gap-1.5 relative ${activeTab === 'network_sftp' ? 'bg-amber-500 text-zinc-950 font-bold' : 'text-zinc-400 hover:text-white'}`}
           >
             <Globe className="h-3.5 w-3.5" /> Network & SFTP
+          </button>
+          <button
+            onClick={() => setActiveTab('domains_playit')}
+            className={`px-3.5 py-2 rounded-xl transition-all flex items-center gap-1.5 relative ${activeTab === 'domains_playit' ? 'bg-amber-500 text-zinc-950 font-bold' : 'text-zinc-400 hover:text-white'}`}
+          >
+            <Radio className="h-3.5 w-3.5 text-emerald-400" /> Domains & Playit
           </button>
           <button
             onClick={() => { setActiveTab('network_protection'); fetchNetworkProtectionStatus(); }}
@@ -1947,6 +1954,9 @@ export const AdminSettings: React.FC = () => {
           )}
         </div>
       )}
+
+      {/* TAB: Domains & Playit */}
+      {activeTab === 'domains_playit' && <AdminDomainAndPlayitSection />}
 
       {/* TAB: Network Protection */}
       {activeTab === 'network_protection' && (

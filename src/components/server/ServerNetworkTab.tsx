@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import {
-  Globe, Key, Copy, Check, RefreshCw, Shield, AlertTriangle,
-  Play, Square, Wifi, CheckCircle2,
-  Lock, Download, RotateCw, Server as ServerIcon,
-  HelpCircle, AlertCircle, Users, Radio, HardDrive, FileCode, Plus, Trash2, Star, Edit2
+  Globe, Copy, Check, RefreshCw, AlertTriangle,
+  Wifi, CheckCircle2, XCircle, Loader2, ShieldCheck, Save,
+  Lock, Download, Server as ServerIcon,
+  Users, Radio, FileCode, Plus, Trash2, Star, Edit2, Zap, Clock
 } from 'lucide-react';
 import { apiRequest } from '../../lib/api';
+import { useToast } from '../../lib/ToastContext';
 import { Server as ServerType, SftpConnectionInfo, Allocation, SftpActiveSessionDTO } from '../../types';
 
 interface ServerNetworkTabProps {
@@ -25,9 +26,46 @@ interface ServerNetworkData {
     publicIpv4?: string;
     sftpPort: number;
   };
+  customDomain?: string;
+  domainVerified?: boolean;
+  domainLastVerifiedAt?: string | null;
+  autoPublishStatus?: 'idle' | 'waiting_dns' | 'live' | 'partial' | 'action_required';
+  autoPublishMessage?: string;
+  cloudflareSynced?: boolean;
+  cloudflareConfigured?: boolean;
+  playitEnabled?: boolean;
+  playitAddress?: string;
+  playitUpdatedAt?: string | null;
+  hostPlayit?: {
+    installed: boolean;
+    running: boolean;
+    state: string;
+    detectedAddresses: string[];
+  };
+}
+
+interface ServerAutomationStep {
+  id: string;
+  label: string;
+  status: 'done' | 'waiting' | 'skipped' | 'action_required';
+  detail: string;
+}
+
+interface ServerDnsVerificationResult {
+  domain: string;
+  validHostname: boolean;
+  dnsStatus: 'verified' | 'mismatch' | 'unconfigured' | 'invalid';
+  resolvedIpv4: string[];
+  cnames: string[];
+  srvRecords: Array<{ name: string; port: number; priority: number; weight: number }>;
+  matchesExpectedIp: boolean;
+  srvMatches: boolean;
+  checkedAt: string;
+  summary: string;
 }
 
 export const ServerNetworkTab: React.FC<ServerNetworkTabProps> = ({ server, onRefreshServer }) => {
+  const { toast } = useToast();
   const [networkData, setNetworkData] = useState<ServerNetworkData | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
@@ -49,20 +87,37 @@ export const ServerNetworkTab: React.FC<ServerNetworkTabProps> = ({ server, onRe
   const [editingAllocId, setEditingAllocId] = useState<string | null>(null);
   const [editingNotes, setEditingNotes] = useState<string>('');
 
-  const fetchNetworkData = async () => {
+  // Custom Domain & Playit state
+  const [customDomainInput, setCustomDomainInput] = useState<string>(server.customDomain || '');
+  const [savingDomain, setSavingDomain] = useState<boolean>(false);
+  const [autoPublishingDomain, setAutoPublishingDomain] = useState<boolean>(false);
+  const [verifyingDomain, setVerifyingDomain] = useState<boolean>(false);
+  const [domainVerifyResult, setDomainVerifyResult] = useState<ServerDnsVerificationResult | null>(null);
+  const [serverAutoSteps, setServerAutoSteps] = useState<ServerAutomationStep[]>([]);
+
+  const [playitEnabledInput, setPlayitEnabledInput] = useState<boolean>(Boolean(server.playitEnabled));
+  const [playitAddressInput, setPlayitAddressInput] = useState<string>(server.playitAddress || '');
+  const [savingPlayit, setSavingPlayit] = useState<boolean>(false);
+
+  const fetchNetworkData = async (quiet = false) => {
     try {
-      setLoading(true);
+      if (!quiet) setLoading(true);
       setError(null);
       const res = await apiRequest(`/servers/${server.id}/network/allocations`);
       if (res.success && res.data) {
         setNetworkData(res.data);
-      } else {
+        if (!quiet) {
+          setCustomDomainInput(res.data.customDomain || '');
+          setPlayitEnabledInput(Boolean(res.data.playitEnabled));
+          setPlayitAddressInput(res.data.playitAddress || '');
+        }
+      } else if (!quiet) {
         setError(res.error?.message || 'Failed to fetch network allocations.');
       }
     } catch (err: any) {
-      setError(err.message || 'Error loading allocations.');
+      if (!quiet) setError(err.message || 'Error loading allocations.');
     } finally {
-      setLoading(false);
+      if (!quiet) setLoading(false);
     }
   };
 
@@ -85,6 +140,39 @@ export const ServerNetworkTab: React.FC<ServerNetworkTabProps> = ({ server, onRe
     fetchSftpInfo();
   }, [server.id]);
 
+  // Automatic background propagation watcher while waiting on DNS
+  useEffect(() => {
+    if (networkData?.autoPublishStatus !== 'waiting_dns' || !networkData?.customDomain) {
+      return;
+    }
+    let attempts = 0;
+    const timer = setInterval(async () => {
+      attempts += 1;
+      if (attempts > 12) {
+        clearInterval(timer);
+        return;
+      }
+      try {
+        const res = await apiRequest(`/servers/${server.id}/network/domain/verify`, {
+          method: 'POST',
+          body: JSON.stringify({ customDomain: networkData.customDomain })
+        });
+        if (res.success && res.data) {
+          setDomainVerifyResult(res.data);
+          if (res.data.dnsStatus === 'verified') {
+            await fetchNetworkData(true);
+            onRefreshServer();
+            toast.success(`${res.data.domain} is verified and live!`);
+            clearInterval(timer);
+          }
+        }
+      } catch {
+        // ignore transient poll error
+      }
+    }, 6000);
+    return () => clearInterval(timer);
+  }, [networkData?.autoPublishStatus, networkData?.customDomain, server.id]);
+
   const copyToClipboard = (text: string, key: string) => {
     navigator.clipboard.writeText(text);
     setCopiedKey(key);
@@ -101,7 +189,7 @@ export const ServerNetworkTab: React.FC<ServerNetworkTabProps> = ({ server, onRe
         await fetchNetworkData();
         onRefreshServer();
       } else {
-        alert(res.error?.message || 'Failed to set primary allocation.');
+        toast.error(res.error?.message || 'Failed to set primary allocation.');
       }
     } finally {
       setActionLoadingId(null);
@@ -124,8 +212,9 @@ export const ServerNetworkTab: React.FC<ServerNetworkTabProps> = ({ server, onRe
         setAllocNotesInput('');
         await fetchNetworkData();
         onRefreshServer();
+        toast.success('Port allocation assigned.');
       } else {
-        alert(res.error?.message || 'Failed to assign allocation.');
+        toast.error(res.error?.message || 'Failed to assign allocation.');
       }
     } finally {
       setAssigningPort(false);
@@ -142,8 +231,9 @@ export const ServerNetworkTab: React.FC<ServerNetworkTabProps> = ({ server, onRe
       if (res.success) {
         await fetchNetworkData();
         onRefreshServer();
+        toast.info(`Released port ${port}.`);
       } else {
-        alert(res.error?.message || 'Failed to release allocation.');
+        toast.error(res.error?.message || 'Failed to release allocation.');
       }
     } finally {
       setActionLoadingId(null);
@@ -179,9 +269,126 @@ export const ServerNetworkTab: React.FC<ServerNetworkTabProps> = ({ server, onRe
     }
   };
 
+  const handleAutoPublishServerDomain = async () => {
+    if (!customDomainInput.trim()) {
+      toast.warning('Enter a custom domain (e.g. play.yourdomain.com) first.');
+      return;
+    }
+    setAutoPublishingDomain(true);
+    try {
+      const res = await apiRequest(`/servers/${server.id}/network/domain/auto-publish`, {
+        method: 'POST',
+        body: JSON.stringify({ customDomain: customDomainInput.trim() })
+      });
+      if (res.success && res.data) {
+        if (Array.isArray(res.data.steps)) setServerAutoSteps(res.data.steps);
+        if (res.data.dnsResult) setDomainVerifyResult(res.data.dnsResult);
+        if (typeof res.data.customDomain === 'string') setCustomDomainInput(res.data.customDomain);
+        setPlayitEnabledInput(Boolean(res.data.playitEnabled));
+        setPlayitAddressInput(res.data.playitAddress || '');
+        await fetchNetworkData(true);
+        onRefreshServer();
+        if (res.data.autoStatus === 'live') {
+          toast.success(res.data.autoMessage || 'Previous connections disconnected and domain linked!');
+        } else {
+          toast.info(res.data.autoMessage || 'Previous connections disconnected! Watching DNS propagation...');
+        }
+      } else {
+        toast.error(res.error?.message || 'Could not auto-link domain.');
+      }
+    } catch (err: any) {
+      toast.error(err?.message || 'Could not auto-link domain.');
+    } finally {
+      setAutoPublishingDomain(false);
+    }
+  };
+
+  const handleSaveCustomDomain = async (domainOverride?: string) => {
+    setSavingDomain(true);
+    try {
+      const target = domainOverride !== undefined ? domainOverride : customDomainInput;
+      const res = await apiRequest(`/servers/${server.id}/network/domain`, {
+        method: 'PUT',
+        body: JSON.stringify({ customDomain: target })
+      });
+      if (res.success) {
+        setDomainVerifyResult(null);
+        setServerAutoSteps([]);
+        await fetchNetworkData();
+        onRefreshServer();
+        toast.success(res.message || 'Custom domain updated.');
+      } else {
+        toast.error(res.error?.message || 'Failed to save custom domain.');
+      }
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to save custom domain.');
+    } finally {
+      setSavingDomain(false);
+    }
+  };
+
+  const handleVerifyCustomDomain = async () => {
+    if (!customDomainInput.trim()) {
+      toast.warning('Enter a custom domain first to verify DNS.');
+      return;
+    }
+    setVerifyingDomain(true);
+    try {
+      const res = await apiRequest(`/servers/${server.id}/network/domain/verify`, {
+        method: 'POST',
+        body: JSON.stringify({ customDomain: customDomainInput.trim() })
+      });
+      if (res.success && res.data) {
+        setDomainVerifyResult(res.data);
+        await fetchNetworkData();
+        onRefreshServer();
+        if (res.data.dnsStatus === 'verified') {
+          toast.success(res.data.summary);
+        } else {
+          toast.warning(res.data.summary);
+        }
+      } else {
+        toast.error(res.error?.message || 'DNS verification failed.');
+      }
+    } catch (err: any) {
+      toast.error(err?.message || 'DNS verification failed.');
+    } finally {
+      setVerifyingDomain(false);
+    }
+  };
+
+  const handleSavePlayit = async () => {
+    setSavingPlayit(true);
+    try {
+      const res = await apiRequest(`/servers/${server.id}/network/playit`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          playitEnabled: playitEnabledInput,
+          playitAddress: playitAddressInput
+        })
+      });
+      if (res.success) {
+        await fetchNetworkData();
+        onRefreshServer();
+        toast.success(res.message || 'Playit.gg settings saved.');
+      } else {
+        toast.error(res.error?.message || 'Failed to save Playit.gg settings.');
+      }
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to save Playit.gg settings.');
+    } finally {
+      setSavingPlayit(false);
+    }
+  };
+
   const primaryAlloc = networkData?.allocations.find(a => a.id === networkData.primaryAllocationId) || networkData?.allocations[0];
+  const primaryPort = primaryAlloc?.port || (server as any).port || server.primaryPort || 25565;
   const primaryHost = networkData?.node.fqdn || networkData?.node.publicIpv4 || (networkData?.node.ip !== '0.0.0.0' ? networkData?.node.ip : '127.0.0.1') || '127.0.0.1';
-  const primaryEndpoint = primaryAlloc ? `${primaryHost}:${primaryAlloc.port}` : `${primaryHost}:${(server as any).port || server.primaryPort || 25565}`;
+  const primaryEndpoint = `${primaryHost}:${primaryPort}`;
+  const activeCustomDomain = networkData?.customDomain || server.customDomain || '';
+  const activePlayitAddress = (networkData?.playitEnabled ?? server.playitEnabled)
+    ? (networkData?.playitAddress || server.playitAddress || '')
+    : '';
 
   return (
     <div className="space-y-4">
@@ -236,6 +443,304 @@ export const ServerNetworkTab: React.FC<ServerNetworkTabProps> = ({ server, onRe
             </button>
           </div>
         </div>
+
+        {(activeCustomDomain || activePlayitAddress) && (
+          <div className="mt-3.5 pt-3 border-t border-[var(--color-line)] flex flex-wrap items-center gap-x-5 gap-y-2 text-xs">
+            {activeCustomDomain && (
+              <div className="flex items-center gap-2">
+                <Globe className="h-3.5 w-3.5 text-[var(--color-accent)]" />
+                <span className="text-[var(--color-ink-mute)]">Custom Domain:</span>
+                <span className="font-mono font-semibold text-[var(--color-ink)] select-all">{activeCustomDomain}</span>
+                {networkData?.domainVerified && (
+                  <span title="DNS Verified" className="inline-flex items-center">
+                    <CheckCircle2 className="h-3.5 w-3.5 text-[var(--color-ok)]" />
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={() => copyToClipboard(activeCustomDomain, 'banner_domain')}
+                  className="p-1 text-[var(--color-ink-mute)] hover:text-[var(--color-ink)] cursor-pointer"
+                  title="Copy Custom Domain"
+                >
+                  {copiedKey === 'banner_domain' ? <Check className="h-3 w-3 text-[var(--color-ok)]" /> : <Copy className="h-3 w-3" />}
+                </button>
+              </div>
+            )}
+
+            {activePlayitAddress && (
+              <div className="flex items-center gap-2">
+                <Radio className="h-3.5 w-3.5 text-[var(--color-ok)]" />
+                <span className="text-[var(--color-ink-mute)]">Playit.gg Public Address:</span>
+                <span className="font-mono font-semibold text-[var(--color-ok)] select-all">{activePlayitAddress}</span>
+                <button
+                  type="button"
+                  onClick={() => copyToClipboard(activePlayitAddress, 'banner_playit')}
+                  className="p-1 text-[var(--color-ink-mute)] hover:text-[var(--color-ink)] cursor-pointer"
+                  title="Copy Playit.gg Address"
+                >
+                  {copiedKey === 'banner_playit' ? <Check className="h-3 w-3 text-[var(--color-ok)]" /> : <Copy className="h-3 w-3" />}
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* ─────────────────────────────────────────────────────────────────────────────
+          1B. CUSTOM DOMAIN & PLAYIT.GG PUBLIC ADDRESS
+      ───────────────────────────────────────────────────────────────────────────── */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {/* Connect Custom Domain */}
+        <div className="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] p-4 sm:p-5 flex flex-col justify-between space-y-4">
+          <div className="space-y-3">
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <h3 className="text-xs font-semibold text-[var(--color-ink)] flex items-center gap-2">
+                  <Globe className="h-3.5 w-3.5 text-[var(--color-accent)]" />
+                  <span>Connect Custom Domain</span>
+                </h3>
+                <p className="text-xs text-[var(--color-ink-mute)] mt-0.5">
+                  Point your own domain name (e.g. play.yourdomain.com) directly to this server.
+                </p>
+              </div>
+              {networkData?.domainVerified ? (
+                <span className="flex items-center gap-1 text-[11px] font-medium text-[var(--color-ok)] shrink-0">
+                  <CheckCircle2 className="h-3.5 w-3.5" />
+                  Live & Public
+                </span>
+              ) : networkData?.autoPublishStatus === 'waiting_dns' ? (
+                <span className="flex items-center gap-1 text-[11px] font-medium text-[var(--color-warn)] shrink-0">
+                  <Clock className="h-3.5 w-3.5 animate-pulse" />
+                  Watching DNS
+                </span>
+              ) : activeCustomDomain ? (
+                <span className="flex items-center gap-1 text-[11px] font-medium text-[var(--color-warn)] shrink-0">
+                  <AlertTriangle className="h-3.5 w-3.5" />
+                  Pending DNS
+                </span>
+              ) : null}
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="label block">Domain / Subdomain</label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={customDomainInput}
+                  onChange={(e) => setCustomDomainInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      handleAutoPublishServerDomain();
+                    }
+                  }}
+                  placeholder="play.yourdomain.com"
+                  className="field flex-1 text-xs font-mono"
+                />
+                {activeCustomDomain && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCustomDomainInput('');
+                      handleSaveCustomDomain('');
+                    }}
+                    disabled={savingDomain || autoPublishingDomain}
+                    className="btn btn-ghost text-xs py-1.5 px-2.5 text-[var(--color-ink-mute)] hover:text-[var(--color-err)] whitespace-nowrap shrink-0"
+                    title="Clear Custom Domain"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+              <p className="text-[11px] text-[var(--color-ink-mute)]">
+                {networkData?.cloudflareConfigured
+                  ? 'Automatically disconnects Playit & previous domains, then creates Cloudflare A/SRV records and connects this domain.'
+                  : 'Automatically disconnects Playit & previous domains, then binds and watches DNS propagation for the entered domain.'}
+              </p>
+            </div>
+
+            {serverAutoSteps.length > 0 && (
+              <div className="rounded-md bg-[var(--color-surface-2)] border border-[var(--color-line)] divide-y divide-[var(--color-line)]">
+                {serverAutoSteps.map((step) => (
+                  <div key={step.id} className="px-3 py-2 flex items-start gap-2 text-xs">
+                    <span className="mt-0.5 shrink-0">
+                      {step.status === 'done' ? (
+                        <CheckCircle2 className="h-3.5 w-3.5 text-[var(--color-ok)]" />
+                      ) : step.status === 'waiting' ? (
+                        <Clock className="h-3.5 w-3.5 text-[var(--color-warn)] animate-pulse" />
+                      ) : step.status === 'action_required' ? (
+                        <AlertTriangle className="h-3.5 w-3.5 text-[var(--color-err)]" />
+                      ) : (
+                        <Check className="h-3.5 w-3.5 text-[var(--color-ink-mute)]" />
+                      )}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <div className="font-medium text-[var(--color-ink)]">{step.label}</div>
+                      <div className="text-[11px] text-[var(--color-ink-mute)] break-words">{step.detail}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Required A + SRV Records */}
+            <div className="rounded-md bg-[var(--color-surface-2)] border border-[var(--color-line)] p-3 space-y-2 text-[11px] font-mono">
+              <div className="text-[var(--color-ink-mute)] font-sans font-medium">
+                DNS Records for <span className="font-mono text-[var(--color-ink)]">{customDomainInput.trim() || 'play.yourdomain.com'}</span>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[var(--color-accent)]">A · {customDomainInput.trim() || 'play.yourdomain.com'}</span>
+                <span className="text-[var(--color-ink)] tabular-nums">{primaryHost}</span>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[var(--color-accent)]">SRV · _minecraft._tcp</span>
+                <span className="text-[var(--color-ink)] tabular-nums truncate">
+                  0 5 {primaryPort} {customDomainInput.trim() || primaryHost}
+                </span>
+              </div>
+            </div>
+
+            {domainVerifyResult && (
+              <div
+                className={`p-2.5 rounded-md border text-xs space-y-1 ${
+                  domainVerifyResult.dnsStatus === 'verified'
+                    ? 'bg-[var(--color-ok)]/10 border-[var(--color-ok)]/30 text-[var(--color-ok)]'
+                    : 'bg-[var(--color-warn)]/10 border-[var(--color-warn)]/30 text-[var(--color-warn)]'
+                }`}
+              >
+                <div className="flex items-center gap-1.5 font-medium">
+                  {domainVerifyResult.dnsStatus === 'verified' ? (
+                    <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                  ) : (
+                    <XCircle className="h-3.5 w-3.5 shrink-0" />
+                  )}
+                  <span>{domainVerifyResult.summary}</span>
+                </div>
+                <div className="text-[11px] font-mono opacity-90">
+                  A: {domainVerifyResult.resolvedIpv4.join(', ') || 'None'} · SRV: {domainVerifyResult.srvRecords.length > 0 ? `${domainVerifyResult.srvRecords[0].name}:${domainVerifyResult.srvRecords[0].port}` : 'None'}
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="flex flex-wrap items-center justify-end gap-2 pt-3 border-t border-[var(--color-line)]">
+            <button
+              type="button"
+              onClick={handleVerifyCustomDomain}
+              disabled={verifyingDomain || !customDomainInput.trim()}
+              className="btn btn-ghost text-xs py-1.5 px-3 flex items-center gap-1.5 whitespace-nowrap shrink-0"
+            >
+              {verifyingDomain ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ShieldCheck className="h-3.5 w-3.5 text-[var(--color-accent)]" />}
+              <span>Verify DNS</span>
+            </button>
+            <button
+              type="button"
+              onClick={handleAutoPublishServerDomain}
+              disabled={autoPublishingDomain || !customDomainInput.trim()}
+              className="btn btn-primary text-xs py-1.5 px-3 flex items-center gap-1.5 whitespace-nowrap shrink-0"
+            >
+              {autoPublishingDomain ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Zap className="h-3.5 w-3.5" />}
+              <span>{autoPublishingDomain ? 'Disconnecting & Connecting...' : 'Disconnect & Connect'}</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Public Address via Playit.gg */}
+        <div className="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] p-4 sm:p-5 flex flex-col justify-between space-y-4">
+          <div className="space-y-3">
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <h3 className="text-xs font-semibold text-[var(--color-ink)] flex items-center gap-2">
+                  <Radio className="h-3.5 w-3.5 text-[var(--color-ok)]" />
+                  <span>Public Address by Playit.gg</span>
+                </h3>
+                <p className="text-xs text-[var(--color-ink-mute)] mt-0.5">
+                  Tunnel players through Playit.gg without opening router/VPS firewall ports.
+                </p>
+              </div>
+              <label className="flex items-center gap-2 text-xs text-[var(--color-ink)] cursor-pointer shrink-0">
+                <input
+                  type="checkbox"
+                  checked={playitEnabledInput}
+                  onChange={(e) => setPlayitEnabledInput(e.target.checked)}
+                  className="h-4 w-4 accent-emerald-500 rounded"
+                />
+                <span>Enabled</span>
+              </label>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="label block">Playit.gg Public Address</label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={playitAddressInput}
+                  onChange={(e) => setPlayitAddressInput(e.target.value)}
+                  placeholder="my-server.gl.joinmc.link"
+                  className="field flex-1 text-xs font-mono"
+                />
+                {playitAddressInput.trim() && (
+                  <button
+                    type="button"
+                    onClick={() => copyToClipboard(playitAddressInput.trim(), 'playit_input')}
+                    className="btn btn-ghost text-xs p-2 shrink-0"
+                    title="Copy Playit Address"
+                  >
+                    {copiedKey === 'playit_input' ? <Check className="h-3.5 w-3.5 text-[var(--color-ok)]" /> : <Copy className="h-3.5 w-3.5" />}
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Local Forward Target Info */}
+            <div className="rounded-md bg-[var(--color-surface-2)] border border-[var(--color-line)] p-3 space-y-1.5 text-xs">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[var(--color-ink-mute)]">Playit Tunnel Local Target:</span>
+                <span className="font-mono font-semibold text-[var(--color-ink)] tabular-nums">
+                  127.0.0.1:{primaryPort}
+                </span>
+              </div>
+              <p className="text-[11px] text-[var(--color-ink-mute)]">
+                In your Playit.gg dashboard, point your tunnel to local port <span className="font-mono text-[var(--color-ink)]">{primaryPort}</span>, then paste the assigned <span className="font-mono">*.joinmc.link</span> or <span className="font-mono">*.ply.gg</span> address above.
+              </p>
+            </div>
+
+            {networkData?.hostPlayit?.detectedAddresses && networkData.hostPlayit.detectedAddresses.length > 0 && (
+              <div className="space-y-1.5">
+                <div className="text-[11px] text-[var(--color-ink-mute)]">
+                  Detected from Host Playit Agent (click to use):
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {networkData.hostPlayit.detectedAddresses.map((addr) => (
+                    <button
+                      key={addr}
+                      type="button"
+                      onClick={() => {
+                        setPlayitAddressInput(addr);
+                        setPlayitEnabledInput(true);
+                      }}
+                      className="px-2 py-1 rounded bg-[var(--color-ok)]/10 hover:bg-[var(--color-ok)]/20 border border-[var(--color-ok)]/30 text-[var(--color-ok)] text-[11px] font-mono cursor-pointer"
+                    >
+                      {addr}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="flex items-center justify-end gap-2 pt-3 border-t border-[var(--color-line)]">
+            <button
+              type="button"
+              onClick={handleSavePlayit}
+              disabled={savingPlayit}
+              className="btn btn-primary text-xs py-1.5 px-3 flex items-center gap-1.5 whitespace-nowrap shrink-0"
+            >
+              {savingPlayit ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+              <span>Save Playit Address</span>
+            </button>
+          </div>
+        </div>
       </div>
 
       {/* ─────────────────────────────────────────────────────────────────────────────
@@ -254,7 +759,7 @@ export const ServerNetworkTab: React.FC<ServerNetworkTabProps> = ({ server, onRe
           </div>
           <button
             type="button"
-            onClick={fetchNetworkData}
+            onClick={() => fetchNetworkData(false)}
             disabled={loading}
             className="p-1.5 rounded-md bg-[var(--color-surface-2)] hover:bg-[var(--color-surface-3)] text-[var(--color-ink-mute)] hover:text-[var(--color-ink)] border border-[var(--color-line)] transition-colors cursor-pointer"
             title="Refresh Allocations"

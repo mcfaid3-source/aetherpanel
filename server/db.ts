@@ -1272,6 +1272,34 @@ export async function getDb(reload = false): Promise<DatabaseSchema> {
           };
         }
 
+        if (!dbCache.settings.domainConfig) {
+          dbCache.settings.domainConfig = {
+            panelDomain: '',
+            gameDomain: '',
+            enforceHttps: true,
+            reverseProxyMode: 'caddy',
+            verified: false,
+            autoPublish: true,
+            cloudflareApiToken: '',
+            cloudflareProxied: false,
+            autoStatus: 'idle',
+            proxyApplied: false
+          };
+        }
+
+        if (!dbCache.settings.playitConfig) {
+          dbCache.settings.playitConfig = {
+            enabled: false,
+            publicAddress: '',
+            agentSecretKey: '',
+            claimUrl: '',
+            autoStartAgent: false,
+            targetPort: 3000,
+            protocol: 'tcp',
+            notes: ''
+          };
+        }
+
         if (!dbCache.settings.socialLinks) {
           dbCache.settings.socialLinks = {
             discord: dbCache.settings.discordUrl || 'https://discord.gg/aetherpanel',
@@ -2002,6 +2030,28 @@ async function generateInitialDb(): Promise<DatabaseSchema> {
       blur: '8px',
       overlayOpacity: 75,
       presetId: 'none'
+    },
+    domainConfig: {
+      panelDomain: '',
+      gameDomain: '',
+      enforceHttps: true,
+      reverseProxyMode: 'caddy',
+      verified: false,
+      autoPublish: true,
+      cloudflareApiToken: '',
+      cloudflareProxied: false,
+      autoStatus: 'idle',
+      proxyApplied: false
+    },
+    playitConfig: {
+      enabled: false,
+      publicAddress: '',
+      agentSecretKey: '',
+      claimUrl: '',
+      autoStartAgent: false,
+      targetPort: 3000,
+      protocol: 'tcp',
+      notes: ''
     }
   };
 

@@ -34,6 +34,13 @@ import { getActiveSftpSessions, terminateSftpSession, terminateServerSftpSession
 import { removeServerPortRule } from '../services/networkProtectionService';
 import { resolveServerPublicEndpoint } from '../network/endpointResolver';
 import { resolveServerType } from './serverTypes';
+import {
+  verifyDomainDns,
+  sanitizeHostname,
+  autoPublishServerDomain,
+  getPlayitAgentStatus
+} from '../services/domainAndPlayitService';
+import { fetchPublicIP } from '../network/networkDetection';
 import { startRemoteDownload, getDownloadJob, listServerDownloadJobs } from '../services/remoteDownloadService';
 import {
   initChunkedUpload,
@@ -2116,6 +2123,7 @@ router.get('/:id/network/allocations', authMiddleware, async (req: Authenticated
   }
 
   const primaryAlloc = assignedAllocations.find(a => a.id === (server as any).allocationId || a.port === (server as any).port) || assignedAllocations[0];
+  const hostPlayit = getPlayitAgentStatus();
 
   res.json({
     success: true,
@@ -2130,7 +2138,241 @@ router.get('/:id/network/allocations', authMiddleware, async (req: Authenticated
         fqdn: node.fqdn,
         publicIpv4: node.publicIpv4,
         sftpPort: node.sftpPort || 2022
+      },
+      customDomain: server.customDomain || '',
+      domainVerified: Boolean(server.domainVerified),
+      domainLastVerifiedAt: server.domainLastVerifiedAt || null,
+      autoPublishStatus: server.autoPublishStatus || 'idle',
+      autoPublishMessage: server.autoPublishMessage || '',
+      cloudflareSynced: Boolean(server.cloudflareSynced),
+      cloudflareConfigured: Boolean(db.settings.domainConfig?.cloudflareApiToken),
+      playitEnabled: Boolean(server.playitEnabled),
+      playitAddress: server.playitAddress || '',
+      playitUpdatedAt: server.playitUpdatedAt || null,
+      hostPlayit: {
+        installed: hostPlayit.installed,
+        running: hostPlayit.running,
+        state: hostPlayit.state,
+        detectedAddresses: hostPlayit.detectedAddresses
       }
+    }
+  });
+});
+
+// POST /api/v1/servers/:id/network/domain/auto-publish - Automatically save, sync DNS (if Cloudflare configured), and verify
+router.post('/:id/network/domain/auto-publish', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
+  const access = await checkServerAccess(req, res, req.params.id, 'network.manage');
+  if (!access) return;
+
+  const { server, db } = access;
+  const raw = typeof req.body?.customDomain === 'string' && req.body.customDomain.trim()
+    ? req.body.customDomain
+    : (server.customDomain || '');
+  const cleaned = raw.trim() ? sanitizeHostname(raw) : '';
+
+  if (!cleaned) {
+    return res.status(400).json({
+      success: false,
+      error: { code: 'MISSING_DOMAIN', message: 'Enter a custom domain name (for example: play.example.com).' }
+    });
+  }
+
+  const node = db.nodes.find(n => n.id === server.nodeId) || db.nodes[0];
+  const primaryPort = (server as any).port || server.primaryPort || 25565;
+  let expectedIp = node?.publicIpv4 || (node?.ip && node.ip !== '0.0.0.0' && node.ip !== '127.0.0.1' ? node.ip : null);
+  if (!expectedIp) {
+    expectedIp = await fetchPublicIP().catch(() => null);
+  }
+  const expectedTarget = node?.fqdn || expectedIp;
+  const cloudflareToken = db.settings.domainConfig?.cloudflareApiToken || '';
+
+  const previousDomain = server.customDomain || '';
+  const hadPlayit = Boolean(server.playitEnabled);
+  const previousPlayitAddress = server.playitAddress || '';
+
+  const automation = await autoPublishServerDomain({
+    customDomain: cleaned,
+    previousDomain,
+    hadPlayit,
+    previousPlayitAddress,
+    publicIp: expectedIp,
+    expectedTarget,
+    port: primaryPort,
+    cloudflareApiToken: cloudflareToken
+  });
+
+  if (automation.steps[0]?.status !== 'action_required') {
+    server.playitEnabled = false;
+    server.playitAddress = undefined;
+    server.playitUpdatedAt = new Date().toISOString();
+    server.customDomain = cleaned;
+    server.domainVerified = automation.dnsResult?.dnsStatus === 'verified';
+    server.domainLastVerifiedAt = automation.dnsResult?.checkedAt;
+    server.autoPublishStatus = automation.autoStatus;
+    server.autoPublishMessage = automation.autoMessage;
+    server.cloudflareSynced = automation.cloudflareSynced;
+    server.updatedAt = new Date().toISOString();
+    saveDbSync();
+
+    await recordServerActivity(
+      server.id,
+      req.user!.id,
+      req.user!.username || 'user',
+      'SERVER_DOMAIN_AUTO_PUBLISHED',
+      `Disconnected previous bindings and auto-linked domain ${cleaned} (status=${automation.autoStatus})`
+    );
+  }
+
+  res.json({
+    success: true,
+    message: automation.autoMessage,
+    data: {
+      customDomain: server.customDomain || '',
+      domainVerified: Boolean(server.domainVerified),
+      domainLastVerifiedAt: server.domainLastVerifiedAt || null,
+      playitEnabled: Boolean(server.playitEnabled),
+      playitAddress: server.playitAddress || '',
+      ...automation
+    }
+  });
+});
+
+// PUT /api/v1/servers/:id/network/domain - Connect or clear custom domain for server
+router.put('/:id/network/domain', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
+  const access = await checkServerAccess(req, res, req.params.id, 'network.manage');
+  if (!access) return;
+
+  const { server } = access;
+  const raw = typeof req.body?.customDomain === 'string' ? req.body.customDomain : '';
+  const cleaned = raw.trim() ? sanitizeHostname(raw) : '';
+
+  if (cleaned && !/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i.test(cleaned)) {
+    return res.status(400).json({
+      success: false,
+      error: { code: 'INVALID_DOMAIN', message: 'Enter a valid domain name (for example: play.example.com).' }
+    });
+  }
+
+  server.customDomain = cleaned || undefined;
+  server.domainVerified = false;
+  server.domainLastVerifiedAt = undefined;
+  server.updatedAt = new Date().toISOString();
+  saveDbSync();
+
+  await recordServerActivity(
+    server.id,
+    req.user!.id,
+    req.user!.username || 'user',
+    'SERVER_DOMAIN_UPDATED',
+    cleaned ? `Connected custom domain ${cleaned}` : 'Cleared custom domain'
+  );
+
+  res.json({
+    success: true,
+    message: cleaned ? `Saved custom domain ${cleaned}.` : 'Custom domain removed.',
+    data: {
+      customDomain: server.customDomain || '',
+      domainVerified: false,
+      domainLastVerifiedAt: null
+    }
+  });
+});
+
+// POST /api/v1/servers/:id/network/domain/verify - Verify A/CNAME/_minecraft._tcp SRV DNS records
+router.post('/:id/network/domain/verify', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
+  const access = await checkServerAccess(req, res, req.params.id, 'network.manage');
+  if (!access) return;
+
+  const { server, db } = access;
+  const raw = typeof req.body?.customDomain === 'string' && req.body.customDomain.trim()
+    ? req.body.customDomain
+    : (server.customDomain || '');
+
+  if (!raw.trim()) {
+    return res.status(400).json({
+      success: false,
+      error: { code: 'MISSING_DOMAIN', message: 'Enter and save a custom domain before verifying DNS.' }
+    });
+  }
+
+  const node = db.nodes.find(n => n.id === server.nodeId) || db.nodes[0];
+  const primaryPort = (server as any).port || server.primaryPort || 25565;
+  const expectedIp = node?.publicIpv4 || (node?.ip && node.ip !== '0.0.0.0' ? node.ip : null);
+  const expectedTarget = node?.fqdn || expectedIp;
+
+  const result = await verifyDomainDns(raw, {
+    expectedIp,
+    expectedTarget,
+    expectedPort: primaryPort,
+    checkSrv: true,
+    checkHttp: false
+  });
+
+  if (result.domain === server.customDomain) {
+    server.domainVerified = result.dnsStatus === 'verified';
+    server.domainLastVerifiedAt = result.checkedAt;
+    server.updatedAt = new Date().toISOString();
+    saveDbSync();
+  }
+
+  res.json({
+    success: true,
+    data: result
+  });
+});
+
+// PUT /api/v1/servers/:id/network/playit - Configure Playit.gg public address for server
+router.put('/:id/network/playit', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
+  const access = await checkServerAccess(req, res, req.params.id, 'network.manage');
+  if (!access) return;
+
+  const { server } = access;
+  const playitEnabled = Boolean(req.body?.playitEnabled);
+  const rawAddress = typeof req.body?.playitAddress === 'string' ? req.body.playitAddress.trim() : '';
+  const cleanedAddress = rawAddress
+    .replace(/^https?:\/\//i, '')
+    .replace(/\/.*$/, '')
+    .trim();
+
+  if (playitEnabled && !cleanedAddress) {
+    return res.status(400).json({
+      success: false,
+      error: { code: 'MISSING_PLAYIT_ADDRESS', message: 'Enter your Playit.gg tunnel address (for example: my-server.gl.joinmc.link).' }
+    });
+  }
+
+  if (cleanedAddress && !/^[a-z0-9][a-z0-9.-]{2,250}(?::\d{2,5})?$/i.test(cleanedAddress)) {
+    return res.status(400).json({
+      success: false,
+      error: { code: 'INVALID_PLAYIT_ADDRESS', message: 'Invalid Playit.gg address format. Expected host or host:port (e.g. name.gl.joinmc.link).' }
+    });
+  }
+
+  server.playitEnabled = playitEnabled;
+  server.playitAddress = cleanedAddress || undefined;
+  server.playitUpdatedAt = new Date().toISOString();
+  server.updatedAt = server.playitUpdatedAt;
+  saveDbSync();
+
+  await recordServerActivity(
+    server.id,
+    req.user!.id,
+    req.user!.username || 'user',
+    'SERVER_PLAYIT_UPDATED',
+    playitEnabled
+      ? `Enabled Playit.gg public address ${cleanedAddress}`
+      : 'Disabled Playit.gg public address'
+  );
+
+  res.json({
+    success: true,
+    message: playitEnabled
+      ? `Playit.gg public address set to ${cleanedAddress}.`
+      : 'Playit.gg public address disabled.',
+    data: {
+      playitEnabled: Boolean(server.playitEnabled),
+      playitAddress: server.playitAddress || '',
+      playitUpdatedAt: server.playitUpdatedAt || null
     }
   });
 });

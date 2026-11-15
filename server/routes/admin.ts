@@ -11,7 +11,17 @@ import { WingsClient } from '../services/wings';
 import { LocalProvider } from '../services/local';
 import { ensureLocalNode } from '../nodeAgent';
 import { resolveNodeSftpMode } from '../sftpResolver';
-import { runNetworkDiagnostics } from '../network/networkDetection';
+import { runNetworkDiagnostics, fetchPublicIP, getLocalIPv4s } from '../network/networkDetection';
+import {
+  verifyDomainDns,
+  sanitizeHostname,
+  detectHostProxyCapabilities,
+  autoPublishPanelDomain,
+  getPlayitAgentStatus,
+  installPlayitBinary,
+  startPlayitAgent,
+  stopPlayitAgent
+} from '../services/domainAndPlayitService';
 import { stopServer, startServer, restartServer, getServerDir } from '../provider';
 import { clearConsoleBuffer, closeServerConsoleClients } from '../consoleWs';
 import { dispatchWebhookEvent } from '../webhookService';
@@ -2064,6 +2074,477 @@ router.get('/network/sftp', async (req: AuthenticatedRequest, res: Response) => 
   } catch (err: any) {
     res.status(500).json({ success: false, error: { code: 'NETWORK_RESOLVE_FAILED', message: err.message } });
   }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DOMAIN CONNECTION & PLAYIT.GG PUBLIC TUNNEL ENDPOINTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+const adminDomainSchema = z.object({
+  panelDomain: z.string().max(253).optional().default(''),
+  gameDomain: z.string().max(253).optional().default(''),
+  enforceHttps: z.boolean().optional().default(true),
+  reverseProxyMode: z.enum(['caddy', 'nginx', 'cloudflare', 'direct']).optional().default('caddy'),
+  autoPublish: z.boolean().optional().default(true),
+  cloudflareApiToken: z.string().max(512).optional().default(''),
+  cloudflareProxied: z.boolean().optional().default(false)
+});
+
+function sanitizeDomainConfigForClient(cfg: NonNullable<SystemSettings['domainConfig']>) {
+  return {
+    ...cfg,
+    hasCloudflareToken: Boolean(cfg.cloudflareApiToken && cfg.cloudflareApiToken.trim()),
+    cloudflareApiToken: cfg.cloudflareApiToken ? '••••••••••••••••' : ''
+  };
+}
+
+// GET /api/v1/admin/network/domain - Get saved domain settings and host IP info
+router.get('/network/domain', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const db = await getDb();
+    const publicIp = await fetchPublicIP().catch(() => null);
+    const localIps = getLocalIPv4s();
+    const panelPort = Number(process.env.PORT || 3000);
+    const domainConfig = db.settings.domainConfig || {
+      panelDomain: '',
+      gameDomain: '',
+      enforceHttps: true,
+      reverseProxyMode: 'caddy' as const,
+      verified: false,
+      autoPublish: true,
+      cloudflareApiToken: '',
+      cloudflareProxied: false,
+      autoStatus: 'idle' as const,
+      proxyApplied: false
+    };
+
+    res.json({
+      success: true,
+      data: {
+        domainConfig: sanitizeDomainConfigForClient(domainConfig),
+        hostNetwork: {
+          publicIp,
+          localIps,
+          panelPort
+        },
+        proxyCapabilities: detectHostProxyCapabilities()
+      }
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: { code: 'DOMAIN_LOAD_FAILED', message: err.message } });
+  }
+});
+
+// PUT /api/v1/admin/network/domain - Save panel & game custom domains
+router.put('/network/domain', async (req: AuthenticatedRequest, res: Response) => {
+  if (req.user?.role !== 'admin' && req.user?.role !== 'super_admin') {
+    return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Admin privileges required.' } });
+  }
+
+  const parsed = adminDomainSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ success: false, error: { code: 'INVALID_INPUT', message: parsed.error.issues[0]?.message || 'Invalid domain configuration.' } });
+  }
+
+  const db = await getDb();
+  const prev = db.settings.domainConfig || {
+    panelDomain: '',
+    gameDomain: '',
+    enforceHttps: true,
+    reverseProxyMode: 'caddy' as const,
+    verified: false,
+    autoPublish: true,
+    cloudflareApiToken: '',
+    cloudflareProxied: false,
+    autoStatus: 'idle' as const,
+    proxyApplied: false
+  };
+
+  const panelDomain = parsed.data.panelDomain ? sanitizeHostname(parsed.data.panelDomain) : '';
+  const gameDomain = parsed.data.gameDomain ? sanitizeHostname(parsed.data.gameDomain) : '';
+  const incomingToken = parsed.data.cloudflareApiToken.trim();
+  const nextToken = incomingToken.includes('••••')
+    ? (prev.cloudflareApiToken || '')
+    : incomingToken;
+
+  const domainChanged = panelDomain !== prev.panelDomain || gameDomain !== prev.gameDomain;
+
+  db.settings.domainConfig = {
+    ...prev,
+    panelDomain,
+    gameDomain,
+    enforceHttps: parsed.data.enforceHttps,
+    reverseProxyMode: parsed.data.reverseProxyMode,
+    autoPublish: parsed.data.autoPublish,
+    cloudflareApiToken: nextToken,
+    cloudflareProxied: parsed.data.cloudflareProxied,
+    verified: domainChanged ? false : prev.verified,
+    autoStatus: domainChanged ? 'idle' : prev.autoStatus,
+    lastVerifiedAt: domainChanged ? undefined : prev.lastVerifiedAt,
+    lastResolvedIp: domainChanged ? undefined : prev.lastResolvedIp
+  };
+
+  saveDbSync();
+
+  await createAuditLog(
+    req.user!.id,
+    req.user!.email,
+    req.user!.role,
+    'ADMIN_UPDATE_DOMAIN_CONFIG',
+    'SYSTEM',
+    `Updated domain config (panel=${panelDomain || 'none'}, game=${gameDomain || 'none'}, proxy=${parsed.data.reverseProxyMode})`
+  );
+
+  res.json({
+    success: true,
+    message: 'Domain settings saved.',
+    data: sanitizeDomainConfigForClient(db.settings.domainConfig)
+  });
+});
+
+// POST /api/v1/admin/network/domain/auto-publish - One-click link, configure DNS/proxy, and verify public domain
+router.post('/network/domain/auto-publish', async (req: AuthenticatedRequest, res: Response) => {
+  if (req.user?.role !== 'admin' && req.user?.role !== 'super_admin') {
+    return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Admin privileges required.' } });
+  }
+
+  const parsed = adminDomainSchema.safeParse(req.body || {});
+  if (!parsed.success) {
+    return res.status(400).json({ success: false, error: { code: 'INVALID_INPUT', message: parsed.error.issues[0]?.message || 'Invalid domain configuration.' } });
+  }
+
+  const db = await getDb();
+  const prev = db.settings.domainConfig || {
+    panelDomain: '',
+    gameDomain: '',
+    enforceHttps: true,
+    reverseProxyMode: 'caddy' as const,
+    verified: false,
+    autoPublish: true,
+    cloudflareApiToken: '',
+    cloudflareProxied: false
+  };
+
+  const panelDomain = sanitizeHostname(parsed.data.panelDomain || prev.panelDomain || '');
+  const gameDomain = sanitizeHostname(parsed.data.gameDomain || '');
+  const incomingToken = parsed.data.cloudflareApiToken.trim();
+  const effectiveToken = incomingToken.includes('••••')
+    ? (prev.cloudflareApiToken || '')
+    : (incomingToken || prev.cloudflareApiToken || '');
+
+  const localNode = db.nodes.find((n) => n.id === 'node_local' || n.isLocal);
+  const previousDomains = [prev.panelDomain, prev.gameDomain, localNode?.fqdn]
+    .filter((d): d is string => Boolean(d && d.trim()));
+
+  const hadGlobalPlayit = Boolean(db.settings.playitConfig?.enabled || db.settings.playitConfig?.publicAddress);
+  let disconnectedPlayitCount = 0;
+  for (const srv of db.servers || []) {
+    if (srv.playitEnabled || srv.playitAddress) {
+      disconnectedPlayitCount += 1;
+    }
+  }
+
+  const publicIp = await fetchPublicIP().catch(() => null);
+  const panelPort = Number(process.env.PORT || 3000);
+
+  const automation = await autoPublishPanelDomain({
+    panelDomain,
+    gameDomain,
+    previousDomains,
+    disconnectedPlayitCount,
+    hadGlobalPlayit,
+    publicIp,
+    panelPort,
+    reverseProxyMode: parsed.data.reverseProxyMode,
+    enforceHttps: parsed.data.enforceHttps,
+    cloudflareApiToken: effectiveToken,
+    cloudflareProxied: parsed.data.cloudflareProxied
+  });
+
+  if (automation.steps[0]?.status !== 'action_required') {
+    // Clear global & per-server Playit bindings now that the custom domain is taking over
+    if (db.settings.playitConfig) {
+      db.settings.playitConfig.enabled = false;
+      db.settings.playitConfig.publicAddress = '';
+      db.settings.playitConfig.autoStartAgent = false;
+      db.settings.playitConfig.updatedAt = new Date().toISOString();
+    }
+    for (const srv of db.servers || []) {
+      if (srv.playitEnabled || srv.playitAddress) {
+        srv.playitEnabled = false;
+        srv.playitAddress = undefined;
+        srv.playitUpdatedAt = new Date().toISOString();
+      }
+    }
+
+    // Bind local node exclusively to newly entered domain/IP
+    if (localNode) {
+      if (publicIp) {
+        localNode.publicIpv4 = publicIp;
+      }
+      localNode.fqdn = gameDomain || '';
+    }
+
+    db.settings.domainConfig = {
+      panelDomain,
+      gameDomain,
+      enforceHttps: parsed.data.enforceHttps,
+      reverseProxyMode: parsed.data.reverseProxyMode,
+      autoPublish: true,
+      cloudflareApiToken: effectiveToken,
+      cloudflareProxied: parsed.data.cloudflareProxied,
+      verified: automation.dnsResult?.dnsStatus === 'verified',
+      lastVerifiedAt: automation.dnsResult?.checkedAt,
+      lastResolvedIp: automation.dnsResult?.resolvedIpv4?.[0] || undefined,
+      autoStatus: automation.autoStatus,
+      autoMessage: automation.autoMessage,
+      proxyApplied: automation.proxyResult.applied,
+      proxyBackend: automation.proxyResult.backend,
+      publicUrl: automation.publicUrl,
+      lastAutoRunAt: new Date().toISOString()
+    };
+
+    saveDbSync();
+
+    await createAuditLog(
+      req.user!.id,
+      req.user!.email,
+      req.user!.role,
+      'ADMIN_AUTO_PUBLISH_DOMAIN',
+      'SYSTEM',
+      `Disconnected previous tunnels/domains and connected ${panelDomain} (status=${automation.autoStatus}, proxy=${automation.proxyResult.backend})`
+    );
+  }
+
+  res.json({
+    success: true,
+    message: automation.autoMessage,
+    data: {
+      domainConfig: sanitizeDomainConfigForClient(db.settings.domainConfig || prev),
+      ...automation
+    }
+  });
+});
+
+// POST /api/v1/admin/network/domain/verify - Live DNS + HTTP/HTTPS probe for custom domain
+router.post('/network/domain/verify', async (req: AuthenticatedRequest, res: Response) => {
+  if (req.user?.role !== 'admin' && req.user?.role !== 'super_admin') {
+    return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Admin privileges required.' } });
+  }
+
+  const db = await getDb();
+  const rawDomain = typeof req.body?.domain === 'string' && req.body.domain.trim()
+    ? req.body.domain
+    : (db.settings.domainConfig?.panelDomain || '');
+
+  if (!rawDomain.trim()) {
+    return res.status(400).json({ success: false, error: { code: 'MISSING_DOMAIN', message: 'Enter a domain name to verify.' } });
+  }
+
+  const publicIp = await fetchPublicIP().catch(() => null);
+  const result = await verifyDomainDns(rawDomain, {
+    expectedIp: publicIp,
+    checkHttp: true
+  });
+
+  if (db.settings.domainConfig && result.domain === db.settings.domainConfig.panelDomain) {
+    db.settings.domainConfig.verified = result.dnsStatus === 'verified';
+    db.settings.domainConfig.lastVerifiedAt = result.checkedAt;
+    db.settings.domainConfig.lastResolvedIp = result.resolvedIpv4[0] || undefined;
+    if (result.dnsStatus === 'verified' && (result.httpsReachable || result.httpReachable || db.settings.domainConfig.proxyApplied)) {
+      db.settings.domainConfig.autoStatus = 'live';
+      db.settings.domainConfig.autoMessage = `${result.domain} is verified and publicly reachable.`;
+    }
+    saveDbSync();
+  }
+
+  res.json({
+    success: true,
+    data: result
+  });
+});
+
+// GET /api/v1/admin/network/playit/status - Masked Playit config + live agent status
+router.get('/network/playit/status', async (req: AuthenticatedRequest, res: Response) => {
+  const db = await getDb();
+  const cfg = db.settings.playitConfig || {
+    enabled: false,
+    publicAddress: '',
+    agentSecretKey: '',
+    claimUrl: '',
+    autoStartAgent: false,
+    targetPort: 25565,
+    protocol: 'tcp' as const,
+    notes: ''
+  };
+  const agent = getPlayitAgentStatus();
+
+  res.json({
+    success: true,
+    data: {
+      config: {
+        ...cfg,
+        hasSecretKey: Boolean(cfg.agentSecretKey && cfg.agentSecretKey.trim()),
+        agentSecretKey: cfg.agentSecretKey ? '••••••••••••••••' : ''
+      },
+      agent
+    }
+  });
+});
+
+// POST /api/v1/admin/network/playit/install - Download Playit CLI binary on Linux host
+router.post('/network/playit/install', async (req: AuthenticatedRequest, res: Response) => {
+  if (req.user?.role !== 'admin' && req.user?.role !== 'super_admin') {
+    return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Admin privileges required.' } });
+  }
+
+  const result = await installPlayitBinary();
+  res.json({
+    success: result.success,
+    message: result.message,
+    data: {
+      ...result,
+      agent: getPlayitAgentStatus()
+    },
+    ...(result.success ? {} : { error: { code: 'PLAYIT_INSTALL_FAILED', message: result.message } })
+  });
+});
+
+// POST /api/v1/admin/network/playit/start - Spawn Playit tunnel agent
+router.post('/network/playit/start', async (req: AuthenticatedRequest, res: Response) => {
+  if (req.user?.role !== 'admin' && req.user?.role !== 'super_admin') {
+    return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Admin privileges required.' } });
+  }
+
+  const db = await getDb();
+  const bodySecret = typeof req.body?.agentSecretKey === 'string' ? req.body.agentSecretKey.trim() : '';
+  const effectiveSecret = bodySecret && !bodySecret.includes('••••')
+    ? bodySecret
+    : (db.settings.playitConfig?.agentSecretKey || '');
+
+  if (bodySecret && !bodySecret.includes('••••') && db.settings.playitConfig) {
+    db.settings.playitConfig.agentSecretKey = bodySecret;
+    saveDbSync();
+  }
+
+  const started = startPlayitAgent(effectiveSecret);
+  if (started.success) {
+    await createAuditLog(
+      req.user!.id,
+      req.user!.email,
+      req.user!.role,
+      'ADMIN_START_PLAYIT_AGENT',
+      'SYSTEM',
+      'Started host Playit.gg tunnel agent'
+    );
+  }
+
+  res.status(started.success ? 200 : 400).json({
+    success: started.success,
+    message: started.message,
+    data: { agent: started.status },
+    ...(started.success ? {} : { error: { code: 'PLAYIT_START_FAILED', message: started.message } })
+  });
+});
+
+// POST /api/v1/admin/network/playit/stop - Stop Playit tunnel agent
+router.post('/network/playit/stop', async (req: AuthenticatedRequest, res: Response) => {
+  if (req.user?.role !== 'admin' && req.user?.role !== 'super_admin') {
+    return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Admin privileges required.' } });
+  }
+
+  const stopped = stopPlayitAgent();
+  await createAuditLog(
+    req.user!.id,
+    req.user!.email,
+    req.user!.role,
+    'ADMIN_STOP_PLAYIT_AGENT',
+    'SYSTEM',
+    'Stopped host Playit.gg tunnel agent'
+  );
+
+  res.json({
+    success: true,
+    message: stopped.message,
+    data: { agent: stopped.status }
+  });
+});
+
+const playitConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  publicAddress: z.string().max(255).optional().default(''),
+  agentSecretKey: z.string().max(512).optional().default(''),
+  autoStartAgent: z.boolean().optional().default(false),
+  targetPort: z.coerce.number().int().min(1).max(65535).optional().default(25565),
+  protocol: z.enum(['tcp', 'udp', 'both']).optional().default('tcp'),
+  notes: z.string().max(500).optional().default('')
+});
+
+// PUT /api/v1/admin/network/playit/config - Save Playit configuration
+router.put('/network/playit/config', async (req: AuthenticatedRequest, res: Response) => {
+  if (req.user?.role !== 'admin' && req.user?.role !== 'super_admin') {
+    return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Admin privileges required.' } });
+  }
+
+  const parsed = playitConfigSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ success: false, error: { code: 'INVALID_INPUT', message: parsed.error.issues[0]?.message || 'Invalid Playit settings.' } });
+  }
+
+  const db = await getDb();
+  const prev = db.settings.playitConfig || {
+    enabled: false,
+    publicAddress: '',
+    agentSecretKey: '',
+    claimUrl: '',
+    autoStartAgent: false,
+    targetPort: 25565,
+    protocol: 'tcp' as const,
+    notes: ''
+  };
+
+  const incomingSecret = parsed.data.agentSecretKey.trim();
+  const nextSecret = incomingSecret.includes('••••')
+    ? (prev.agentSecretKey || '')
+    : incomingSecret;
+
+  const agent = getPlayitAgentStatus();
+
+  db.settings.playitConfig = {
+    enabled: parsed.data.enabled,
+    publicAddress: parsed.data.publicAddress.trim(),
+    agentSecretKey: nextSecret,
+    claimUrl: agent.claimUrl || prev.claimUrl || '',
+    autoStartAgent: parsed.data.autoStartAgent,
+    targetPort: parsed.data.targetPort,
+    protocol: parsed.data.protocol,
+    notes: parsed.data.notes.trim(),
+    updatedAt: new Date().toISOString()
+  };
+
+  saveDbSync();
+
+  await createAuditLog(
+    req.user!.id,
+    req.user!.email,
+    req.user!.role,
+    'ADMIN_UPDATE_PLAYIT_CONFIG',
+    'SYSTEM',
+    `Updated Playit.gg tunnel config (enabled=${parsed.data.enabled}, address=${parsed.data.publicAddress.trim() || 'none'})`
+  );
+
+  res.json({
+    success: true,
+    message: 'Playit.gg public tunnel settings saved.',
+    data: {
+      config: {
+        ...db.settings.playitConfig,
+        hasSecretKey: Boolean(db.settings.playitConfig.agentSecretKey),
+        agentSecretKey: db.settings.playitConfig.agentSecretKey ? '••••••••••••••••' : ''
+      },
+      agent
+    }
+  });
 });
 
 // GET /api/v1/admin/sftp/status - Get SFTP Subsystem status & config

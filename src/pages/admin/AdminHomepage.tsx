@@ -7,6 +7,7 @@ import {
 import { useBranding } from '../../lib/BrandingContext';
 import { apiRequest } from '../../lib/api';
 import { HomepageConfig } from '../../types';
+import { HeroWallpaperPreview } from '../../components/admin/HeroWallpaperPreview';
 
 interface AdminHomepageProps {
   onNavigate?: (page: string, params?: any) => void;
@@ -44,6 +45,12 @@ export const AdminHomepage: React.FC<AdminHomepageProps> = ({ onNavigate }) => {
   const [heroSlideDelaySeconds, setHeroSlideDelaySeconds] = useState<number>(
     homepageConfig.heroSlideDelaySeconds || 5.5
   );
+  const [activeWallpaperIndex, setActiveWallpaperIndex] = useState<number>(0);
+
+  const parsedHeroWallpapers = heroBackgroundImagesText
+    .split('\n')
+    .map(s => s.trim())
+    .filter(Boolean);
 
   // Section Toggles
   const [showTrustBar, setShowTrustBar] = useState<boolean>(homepageConfig.showTrustBar ?? true);
@@ -628,31 +635,26 @@ export const AdminHomepage: React.FC<AdminHomepageProps> = ({ onNavigate }) => {
                   </select>
                 </div>
 
-                <div>
-                  <span className="block text-[11px] text-zinc-400 mb-1.5 font-mono">
-                    Active Images ({heroBackgroundImagesText.split('\n').filter(s => s.trim()).length}):
+                <div className="pt-1 space-y-1">
+                  <span className="block text-[11px] text-zinc-400 font-mono tabular-nums">
+                    Configured Slides: {parsedHeroWallpapers.length}
                   </span>
-                  <div className="flex items-center gap-2 overflow-x-auto pb-1">
-                    {heroBackgroundImagesText.split('\n').filter(s => s.trim()).map((imgUrl, i) => (
-                      <div key={i} className="h-12 w-20 rounded-lg overflow-hidden border border-white/[0.1] bg-black shrink-0 relative group">
-                        <img
-                          src={imgUrl.trim()}
-                          alt={`Hero wallpaper ${i + 1}`}
-                          className="w-full h-full object-cover"
-                          referrerPolicy="no-referrer"
-                          onError={(e) => {
-                            (e.target as HTMLElement).style.display = 'none';
-                          }}
-                        />
-                        <span className="absolute bottom-0 right-0 px-1 py-0.2 rounded-tl text-[9px] bg-black/80 text-zinc-300 font-mono">
-                          #{i + 1}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
+                  <p className="text-[11px] text-zinc-500 leading-relaxed">
+                    Select any thumbnail below or step through slides to inspect the currently active hero wallpaper.
+                  </p>
                 </div>
               </div>
             </div>
+
+            <HeroWallpaperPreview
+              urls={parsedHeroWallpapers}
+              slideDelaySeconds={heroSlideDelaySeconds}
+              headlinePrefix={heroHeadlinePrefix}
+              headlineAccent={heroHeadlineAccent}
+              description={heroDescription}
+              selectedIndex={activeWallpaperIndex}
+              onSelectIndex={setActiveWallpaperIndex}
+            />
           </div>
 
           {/* Main Headline & Description */}

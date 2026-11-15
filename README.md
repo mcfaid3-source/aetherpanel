@@ -5,6 +5,21 @@ AetherPanel is a high-performance, full-stack game server management panel built
 
 ---
 
+## ⚡ One-Command Quick Install (Linux / VPS / Container)
+
+Paste this single command anywhere to install all system dependencies (`git`, `curl`, `openssl`, `Node.js 20+`), clone AetherPanel, install npm packages, build, and launch on port **3000**:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mcfaid3-source/aetherpanel/main/install.sh | sudo bash
+```
+
+For completely unattended zero-touch installation with default settings:
+```bash
+curl -fsSL https://raw.githubusercontent.com/mcfaid3-source/aetherpanel/main/install.sh | sudo bash -s -- --panel --yes
+```
+
+---
+
 ## 💻 Local Development Setup
 
 Follow these steps to deploy a development instance of AetherPanel on your local machine.
@@ -19,7 +34,7 @@ Ensure your environment meets the following minimum requirements:
 Clone the repository and initialize the project dependencies:
 ```bash
 # Clone the repository
-git clone https://github.com/your-username/aetherpanel.git
+git clone https://github.com/mcfaid3-source/aetherpanel.git
 cd aetherpanel
 
 # Install dependencies

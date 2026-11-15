@@ -4,6 +4,7 @@ import { useTheme } from '../../lib/ThemeContext';
 import { useAnimation } from '../../lib/AnimationContext';
 import { THEME_PRESETS, FONT_OPTIONS } from '../../lib/theme';
 import { apiRequest } from '../../lib/api';
+import { AdminSectionBackgroundCard } from '../../components/admin/AdminSectionBackgroundCard';
 
 export const AdminAppearance: React.FC = () => {
   const {
@@ -338,6 +339,9 @@ export const AdminAppearance: React.FC = () => {
           <ArrowRight className="h-3.5 w-3.5" />
         </button>
       </div>
+
+      {/* Admin-Only Section Background */}
+      <AdminSectionBackgroundCard />
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left Column: Theme Presets & Typography */}

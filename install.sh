@@ -13,7 +13,7 @@
 #                    DEFAULT PORT: 3000
 #                    Made with ❤ by ZenseiBabe
 #
-# Official Source Repository: https://github.com/mrrangerxd/aetherpanel
+# Official Source Repository: https://github.com/mcfaid3-source/aetherpanel
 # Universal Cross-Platform Installer, Updater & Node Pairer v4.0
 # ==============================================================================
 
@@ -22,7 +22,7 @@ set -Eeuo pipefail
 # ==============================================================================
 # 1. CENTRALIZED CONFIGURATION & ENVIRONMENT VARIABLES
 # ==============================================================================
-REPO_URL="https://github.com/mrrangerxd/aetherpanel"
+REPO_URL="https://github.com/mcfaid3-source/aetherpanel"
 REPO_BRANCH="main"
 DEFAULT_ROOT_INSTALL_DIR="/opt/aetherpanel"
 DEFAULT_USER_INSTALL_DIR="${HOME:-/tmp}/aetherpanel"
@@ -759,33 +759,55 @@ install_node_runtime() {
 verify_and_install_dependencies() {
   echo -e "${CYAN}    Auditing core system dependencies...${NC}"
 
+  local updated_cache=false
+  ensure_pkg_cache() {
+    if [ "$updated_cache" = false ]; then
+      update_packages
+      updated_cache=true
+    fi
+  }
+
+  # 0. CA Certificates (needed for HTTPS git/curl in minimal containers)
+  if [ "$PKG_MGR" = "apt-get" ] || [ "$PKG_MGR" = "apt" ] || [ "$PKG_MGR" = "apk" ]; then
+    if [ ! -d /etc/ssl/certs ] || [ -z "$(ls -A /etc/ssl/certs 2>/dev/null || true)" ]; then
+      ensure_pkg_cache
+      install_package ca-certificates
+    fi
+  fi
+
   # 1. Curl & Wget
   if ! command -v curl &> /dev/null && ! command -v wget &> /dev/null; then
     echo -e "${CYAN}    Installing curl...${NC}"
+    ensure_pkg_cache
     install_package curl || install_package wget
   fi
 
   # 2. Git
   if ! command -v git &> /dev/null; then
     echo -e "${CYAN}    Installing git...${NC}"
+    ensure_pkg_cache
     install_package git
   fi
 
   # 3. Compression Utilities (Tar, Unzip)
   if ! command -v tar &> /dev/null; then
+    ensure_pkg_cache
     install_package tar
   fi
   if ! command -v unzip &> /dev/null; then
+    ensure_pkg_cache
     install_package unzip
   fi
 
   # 4. OpenSSL
   if ! command -v openssl &> /dev/null; then
+    ensure_pkg_cache
     install_package openssl
   fi
 
   # 5. Node.js Engine Check
   if ! verify_node_runtime; then
+    ensure_pkg_cache
     install_node_runtime
   else
     local curr_node
@@ -950,6 +972,10 @@ check_port_available() {
     if [ -n "$owner_info" ]; then
       echo -e "    Owning process: ${WHITE}${owner_info}${NC}"
     fi
+    if [ "$AUTO_CONFIRM" = true ] || ( [ ! -t 0 ] && ! (exec < /dev/tty) 2>/dev/null ); then
+      echo -e "${BLUE}[AUTO] Continuing with port ${port}...${NC}"
+      return 0
+    fi
     echo -e "\n  ${CYAN}1)${NC} Use another port"
     echo -e "  ${CYAN}2)${NC} Continue anyway (Port may be owned by existing AetherPanel instance)"
     echo -e "  ${RED}0)${NC} Abort installation\n"
@@ -1110,7 +1136,8 @@ PID_FILE="${SCRIPT_DIR}/data/aetherpanel.pid"
 LOG_FILE="${SCRIPT_DIR}/data/logs/panel.log"
 mkdir -p "${SCRIPT_DIR}/data/logs"
 
-cd "${SCRIPT_DIR}"
+  cd "${SCRIPT_DIR}"
+export PATH="${SCRIPT_DIR}/runtimes/node/bin:${PATH}"
 export NODE_ENV=production
 
 while true; do
@@ -1145,15 +1172,18 @@ SUPERVISOR_EOF
   chmod +x "${install_dir}/bin/aetherpanel-supervisor.sh"
 
   # 2. Generate aetherpanel-ctl management tool
-  cat <<CTL_EOF > "${install_dir}/bin/aetherpanel-ctl"
+  cat <<CTL_HEADER_EOF > "${install_dir}/bin/aetherpanel-ctl"
 #!/usr/bin/env bash
 INSTALL_DIR="${install_dir}"
-PID_FILE="\${INSTALL_DIR}/data/aetherpanel.pid"
-LOG_FILE="\${INSTALL_DIR}/data/logs/panel.log"
 INIT_SYS="${INIT_SYSTEM}"
+CTL_HEADER_EOF
+  cat <<'CTL_BODY_EOF' >> "${install_dir}/bin/aetherpanel-ctl"
+PID_FILE="${INSTALL_DIR}/data/aetherpanel.pid"
+LOG_FILE="${INSTALL_DIR}/data/logs/panel.log"
+export PATH="${INSTALL_DIR}/runtimes/node/bin:${PATH}"
 
 check_pid_alive() {
-  local p="$1"
+  local p="${1:-}"
   if [ -z "$p" ]; then return 1; fi
   if ! [[ "$p" =~ ^[0-9]+$ ]]; then return 1; fi
   if kill -0 "$p" 2>/dev/null; then
@@ -1172,7 +1202,7 @@ check_pid_alive() {
 
 case "${1:-status}" in
   start)
-    if [ "$INIT_SYS" = "systemd" ] && command -v systemctl &>/dev/null && [ $(id -u) -eq 0 ]; then
+    if [ "$INIT_SYS" = "systemd" ] && command -v systemctl &>/dev/null && [ "$(id -u)" -eq 0 ]; then
       systemctl start aetherpanel
     else
       ACTIVE_PID=$(cat "$PID_FILE" 2>/dev/null || echo "")
@@ -1190,44 +1220,44 @@ case "${1:-status}" in
     fi
     ;;
   stop)
-    if [ "\$INIT_SYS" = "systemd" ] && command -v systemctl &>/dev/null && [ \$(id -u) -eq 0 ]; then
+    if [ "$INIT_SYS" = "systemd" ] && command -v systemctl &>/dev/null && [ "$(id -u)" -eq 0 ]; then
       systemctl stop aetherpanel 2>/dev/null || true
     fi
-    if [ -f "\$PID_FILE" ]; then
-      PID=\$(cat "\$PID_FILE" 2>/dev/null || echo "")
-      if [ -n "\$PID" ]; then
-        kill -TERM "\$PID" 2>/dev/null || true
+    if [ -f "$PID_FILE" ]; then
+      PID=$(cat "$PID_FILE" 2>/dev/null || echo "")
+      if [ -n "$PID" ]; then
+        kill -TERM "$PID" 2>/dev/null || true
         sleep 1
-        kill -9 "\$PID" 2>/dev/null || true
+        kill -9 "$PID" 2>/dev/null || true
       fi
-      rm -f "\$PID_FILE"
+      rm -f "$PID_FILE"
     fi
     pkill -f "aetherpanel-supervisor.sh" 2>/dev/null || true
     pkill -f "dist/server.cjs" 2>/dev/null || true
     echo "AetherPanel stopped."
     ;;
   restart)
-    "\$0" stop
+    "$0" stop
     sleep 2
-    "\$0" start
+    "$0" start
     ;;
   status)
-    if [ "\$INIT_SYS" = "systemd" ] && command -v systemctl &>/dev/null && [ \$(id -u) -eq 0 ]; then
+    if [ "$INIT_SYS" = "systemd" ] && command -v systemctl &>/dev/null && [ "$(id -u)" -eq 0 ]; then
       systemctl status aetherpanel
     else
-      ACTIVE_PID=\$(cat "\$PID_FILE" 2>/dev/null || echo "")
-      if check_pid_alive "\$ACTIVE_PID"; then
-        echo "AetherPanel is RUNNING (PID \$ACTIVE_PID)."
+      ACTIVE_PID=$(cat "$PID_FILE" 2>/dev/null || echo "")
+      if check_pid_alive "$ACTIVE_PID"; then
+        echo "AetherPanel is RUNNING (PID $ACTIVE_PID)."
       else
         echo "AetherPanel is STOPPED."
       fi
     fi
     ;;
   logs)
-    if [ "\$INIT_SYS" = "systemd" ] && command -v journalctl &>/dev/null && [ \$(id -u) -eq 0 ]; then
+    if [ "$INIT_SYS" = "systemd" ] && command -v journalctl &>/dev/null && [ "$(id -u)" -eq 0 ]; then
       journalctl -u aetherpanel -n 50 -f
     else
-      tail -f -n 50 "\$LOG_FILE"
+      tail -f -n 50 "$LOG_FILE"
     fi
     ;;
   *)
@@ -1235,13 +1265,13 @@ case "${1:-status}" in
     exit 1
     ;;
 esac
-CTL_EOF
+CTL_BODY_EOF
   chmod +x "${install_dir}/bin/aetherpanel-ctl"
 
   # Link command globally if permitted
   if [ "$IS_ROOT" = true ] && [ -d /usr/local/bin ]; then
     ln -sf "${install_dir}/bin/aetherpanel-ctl" /usr/local/bin/aetherpanel 2>/dev/null || true
-  elif [ -d "${HOME:-}/.local/bin" ]; then
+  elif [ -n "${HOME:-}" ] && [ -d "${HOME}/.local/bin" ]; then
     ln -sf "${install_dir}/bin/aetherpanel-ctl" "${HOME}/.local/bin/aetherpanel" 2>/dev/null || true
   fi
 
@@ -1263,7 +1293,7 @@ RestartSec=5
 Environment=NODE_ENV=production
 Environment=PORT=${port}
 Environment=SFTP_PORT=2022
-Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:${install_dir}/bin:${install_dir}/runtimes/node/bin:${HOME}/.local/bin:${HOME}/.bun/bin
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:${install_dir}/bin:${install_dir}/runtimes/node/bin:${HOME:-/root}/.local/bin:${HOME:-/root}/.bun/bin
 StandardOutput=append:/var/log/aetherpanel/panel.log
 StandardError=append:/var/log/aetherpanel/panel.log
 
@@ -1327,6 +1357,11 @@ install_panel() {
 
   # Existing Installation Detection
   if [ -d "$INSTALL_DIR" ] && [ -f "$INSTALL_DIR/package.json" ]; then
+    if [ "$AUTO_CONFIRM" = true ]; then
+      echo -e "${YELLOW}[AUTO] Existing AetherPanel installation detected at ${INSTALL_DIR}. Updating...${NC}\n"
+      update_panel
+      return
+    fi
     echo -e "${YELLOW}${BOLD}Existing AetherPanel installation detected at ${INSTALL_DIR}.${NC}\n"
     echo -e "  ${CYAN}1)${NC} Update existing installation (Pull latest code from GitHub)"
     echo -e "  ${CYAN}2)${NC} Reinstall application (Preserve database and user files)"
@@ -1346,84 +1381,113 @@ install_panel() {
 
   echo -e "Starting AetherPanel Panel Installation Sequence...\n"
 
-  # Panel URL Prompt (Mandatory Wizard Requirement)
+  local is_noninteractive=false
+  if [ "$AUTO_CONFIRM" = true ] || ( [ ! -t 0 ] && ! (exec < /dev/tty) 2>/dev/null ); then
+    is_noninteractive=true
+  fi
+
+  # Panel URL Prompt (Mandatory Wizard Requirement, auto-resolved in --yes mode)
   if [ -z "${PANEL_URL:-}" ]; then
-    echo -e "Enter your Panel Public URL (e.g. domain or public IP):"
-    echo -e "Examples:"
-    echo -e "  https://panel.example.com"
-    echo -e "  http://123.123.123.123:3000\n"
+    if [ "$is_noninteractive" = true ]; then
+      local auto_ip
+      auto_ip=$(curl -s -m 4 https://api.ipify.org 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}' || echo "127.0.0.1")
+      auto_ip="${auto_ip:-127.0.0.1}"
+      PANEL_URL="http://${auto_ip}:${PANEL_PORT:-3000}"
+      echo -e "${CYAN}[AUTO] Using detected Panel URL: ${BOLD}${PANEL_URL}${NC}"
+    else
+      echo -e "Enter your Panel Public URL (e.g. domain or public IP):"
+      echo -e "Examples:"
+      echo -e "  https://panel.example.com"
+      echo -e "  http://123.123.123.123:3000\n"
 
-    while true; do
-      local input_url
-      input_url=$(prompt_input "Panel URL: ")
-      input_url=$(normalize_url "$input_url")
+      while true; do
+        local input_url
+        input_url=$(prompt_input "Panel URL: ")
+        input_url=$(normalize_url "$input_url")
 
-      if [ -z "$input_url" ]; then
-        echo -e "${RED}[ERROR] Panel URL cannot be empty.${NC}"
-        continue
-      fi
+        if [ -z "$input_url" ]; then
+          echo -e "${RED}[ERROR] Panel URL cannot be empty.${NC}"
+          continue
+        fi
 
-      if validate_url "$input_url"; then
-        PANEL_URL="$input_url"
-        break
-      else
-        echo -e "${RED}[ERROR] Invalid Panel URL format. Must start with http:// or https:// and contain a valid hostname or IP address.${NC}"
-      fi
-    done
+        if validate_url "$input_url"; then
+          PANEL_URL="$input_url"
+          break
+        else
+          echo -e "${RED}[ERROR] Invalid Panel URL format. Must start with http:// or https:// and contain a valid hostname or IP address.${NC}"
+        fi
+      done
+    fi
   else
     PANEL_URL=$(normalize_url "$PANEL_URL")
   fi
 
   # Local Node FQDN Prompt (Wings Daemon Host & Server Connection Address)
   if [ -z "${NODE_FQDN:-}" ]; then
-    echo -e "\nEnter your Local Node FQDN / Hostname (e.g. node subdomain or public IP):"
-    echo -e "This hostname/IP is used by players and users to connect to game servers."
-    echo -e "Examples:"
-    echo -e "  node.znx.xyz.com"
-    echo -e "  https://node.znx.xyz.com"
-    echo -e "  ${SERVER_IP:-127.0.0.1}\n"
-
     local default_node_fqdn
     default_node_fqdn=$(echo "${PANEL_URL}" | sed -E 's|^https?://||; s|:[0-9]+.*$||; s|/.*$||')
     if [ -z "$default_node_fqdn" ]; then
       default_node_fqdn="${SERVER_IP:-localhost}"
     fi
 
-    local input_node_fqdn
-    input_node_fqdn=$(prompt_input "Local Node FQDN [Default: ${default_node_fqdn}]: ")
-    NODE_FQDN="${input_node_fqdn:-$default_node_fqdn}"
+    if [ "$is_noninteractive" = true ]; then
+      NODE_FQDN="$default_node_fqdn"
+    else
+      echo -e "\nEnter your Local Node FQDN / Hostname (e.g. node subdomain or public IP):"
+      echo -e "This hostname/IP is used by players and users to connect to game servers."
+      echo -e "Examples:"
+      echo -e "  node.znx.xyz.com"
+      echo -e "  https://node.znx.xyz.com"
+      echo -e "  ${SERVER_IP:-127.0.0.1}\n"
+
+      local input_node_fqdn
+      input_node_fqdn=$(prompt_input "Local Node FQDN [Default: ${default_node_fqdn}]: ")
+      NODE_FQDN="${input_node_fqdn:-$default_node_fqdn}"
+    fi
     NODE_FQDN=$(echo "$NODE_FQDN" | sed -E 's|^https?://||; s|:[0-9]+.*$||; s|/.*$||')
   else
     NODE_FQDN=$(echo "$NODE_FQDN" | sed -E 's|^https?://||; s|:[0-9]+.*$||; s|/.*$||')
   fi
 
   if [ -z "${PANEL_PORT:-}" ]; then
-    local user_port
-    user_port=$(prompt_input "Enter preferred Panel Web Port [Default: 3000]: ")
-    PANEL_PORT="${user_port:-3000}"
+    if [ "$is_noninteractive" = true ]; then
+      PANEL_PORT="3000"
+    else
+      local user_port
+      user_port=$(prompt_input "Enter preferred Panel Web Port [Default: 3000]: ")
+      PANEL_PORT="${user_port:-3000}"
+    fi
   fi
 
   check_port_available "$PANEL_PORT"
 
   if [ -z "${ADMIN_EMAIL:-}" ]; then
-    local input_email
-    input_email=$(prompt_input "Enter Admin Email Address [Default: admin@aetherpanel.in]: ")
-    ADMIN_EMAIL="${input_email:-admin@aetherpanel.in}"
+    if [ "$is_noninteractive" = true ]; then
+      ADMIN_EMAIL="admin@aetherpanel.in"
+    else
+      local input_email
+      input_email=$(prompt_input "Enter Admin Email Address [Default: admin@aetherpanel.in]: ")
+      ADMIN_EMAIL="${input_email:-admin@aetherpanel.in}"
+    fi
   fi
 
   if [ -z "${ADMIN_PASS:-}" ]; then
-    local input_pass
-    input_pass=$(prompt_input "Enter Admin Password [Default: adminopp]: " true)
-    if [ -n "$input_pass" ]; then
-      local confirm_pass
-      confirm_pass=$(prompt_input "Confirm Admin Password: " true)
-      if [ "$input_pass" != "$confirm_pass" ]; then
-        echo -e "${RED}[ERROR] Passwords do not match. Aborting installation.${NC}"
-        return 1
-      fi
-      ADMIN_PASS="$input_pass"
-    else
+    if [ "$is_noninteractive" = true ]; then
       ADMIN_PASS="adminopp"
+    else
+      local input_pass
+      input_pass=$(prompt_input "Enter Admin Password [Default: adminopp]: " true)
+      if [ -n "$input_pass" ]; then
+        local confirm_pass
+        confirm_pass=$(prompt_input "Confirm Admin Password: " true)
+        if [ "$input_pass" != "$confirm_pass" ]; then
+          echo -e "${RED}[ERROR] Passwords do not match. Aborting installation.${NC}"
+          return 1
+        fi
+        ADMIN_PASS="$input_pass"
+      else
+        ADMIN_PASS="adminopp"
+      fi
     fi
   fi
 
@@ -1598,15 +1662,15 @@ EOF
   cd "$INSTALL_DIR"
   log_msg "Installing npm packages in $INSTALL_DIR"
   echo -e "${CYAN}    Resolving and installing full package dependencies...${NC}"
-  if ! npm install --production=false >> "$LOG_FILE" 2>&1; then
+  if ! NODE_ENV=development npm install --include=dev --no-audit --no-fund >> "$LOG_FILE" 2>&1; then
     echo -e "${YELLOW}    Retrying npm install with --legacy-peer-deps...${NC}"
-    npm install --production=false --legacy-peer-deps >> "$LOG_FILE" 2>&1 || true
+    NODE_ENV=development npm install --include=dev --legacy-peer-deps --no-audit --no-fund >> "$LOG_FILE" 2>&1 || true
   fi
 
   # Verify core build dependencies exist
   if [ ! -d "$INSTALL_DIR/node_modules" ] || [ ! -f "$INSTALL_DIR/node_modules/.bin/vite" ]; then
     echo -e "${YELLOW}    Installing required build toolchain...${NC}"
-    npm install --include=dev --legacy-peer-deps >> "$LOG_FILE" 2>&1 || true
+    NODE_ENV=development npm install --include=dev --legacy-peer-deps --no-audit --no-fund >> "$LOG_FILE" 2>&1 || true
   fi
 
   echo -e "${CYAN}    Compiling frontend and backend bundles (npm run build)...${NC}"
@@ -1678,7 +1742,7 @@ ExecStart=/usr/bin/env node ${local_daemon_dir}/agent.js
 Restart=always
 RestartSec=3
 Environment=NODE_ENV=production
-Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:${HOME}/.bun/bin
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:${INSTALL_DIR}/runtimes/node/bin:${HOME:-/root}/.bun/bin
 StandardOutput=append:${local_daemon_logs}/agent.log
 StandardError=append:${local_daemon_logs}/agent.log
 LimitNOFILE=65535
@@ -1858,7 +1922,10 @@ EOF
     echo -e "${CYAN}    Downloading daemon files from repository...${NC}"
     local tmp_daemon
     tmp_daemon=$(mktemp -d 2>/dev/null || echo "/tmp/daemon_dl_$$")
-    if git clone --depth 1 "https://github.com/mrrangerxd/daemon" "$tmp_daemon" >> "$LOG_FILE" 2>&1; then
+    if git clone --depth 1 -b "$REPO_BRANCH" "$REPO_URL" "$tmp_daemon" >> "$LOG_FILE" 2>&1 && [ -d "$tmp_daemon/daemon" ]; then
+      cp -a "$tmp_daemon/daemon"/* "${node_cfg_dir}/" 2>/dev/null || true
+      rm -rf "$tmp_daemon"
+    elif git clone --depth 1 "https://github.com/mrrangerxd/daemon" "$tmp_daemon" >> "$LOG_FILE" 2>&1; then
       cp -a "$tmp_daemon"/* "${node_cfg_dir}/" 2>/dev/null || true
       rm -rf "$tmp_daemon"
     fi
@@ -1901,7 +1968,7 @@ ExecStart=/usr/bin/env node ${node_cfg_dir}/agent.js
 Restart=always
 RestartSec=3
 Environment=NODE_ENV=production
-Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:${HOME}/.bun/bin
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:${HOME:-/root}/.bun/bin
 StandardOutput=append:${node_log_dir}/agent.log
 StandardError=append:${node_log_dir}/agent.log
 LimitNOFILE=65535
@@ -2224,9 +2291,18 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --panel)
-      MODE="panel"
-      SHOW_MENU=false
-      shift
+      if [ $# -ge 2 ] && [[ -n "${2:-}" ]] && [[ "${2:-}" =~ ^https?:// ]]; then
+        PANEL_URL="$2"
+        if [ -z "${MODE:-}" ]; then
+          MODE="panel"
+        fi
+        SHOW_MENU=false
+        shift 2
+      else
+        MODE="panel"
+        SHOW_MENU=false
+        shift
+      fi
       ;;
     --panel-url|--url)
       if [ $# -ge 2 ] && [[ -n "${2:-}" ]] && [[ ! "$2" =~ ^-- ]]; then
@@ -2297,6 +2373,14 @@ while [[ $# -gt 0 ]]; do
         shift
       fi
       ;;
+    --repo)
+      if [ $# -ge 2 ] && [[ -n "${2:-}" ]] && [[ ! "$2" =~ ^-- ]]; then
+        REPO_URL="$2"
+        shift 2
+      else
+        shift
+      fi
+      ;;
     --branch)
       if [ $# -ge 2 ] && [[ -n "${2:-}" ]] && [[ ! "$2" =~ ^-- ]]; then
         REPO_BRANCH="$2"
@@ -2318,6 +2402,7 @@ while [[ $# -gt 0 ]]; do
     --help|-h)
       echo -e "${CYAN}AetherPanel Universal Cross-Platform Installer CLI Usage:${NC}"
       echo -e "  bash install.sh                                         # Interactive Menu"
+      echo -e "  bash install.sh --panel --yes                           # Zero-Touch Automated Panel Install"
       echo -e "  bash install.sh --panel --url http://IP:3000 --port 3000 # Automated Panel Install"
       echo -e "  bash install.sh --update                                # Pull Latest GitHub Code"
       echo -e "  bash install.sh --node --url http://IP:3000 --token TOK # Automated Node Pairing"
@@ -2362,7 +2447,9 @@ while true; do
   echo -e "  ${RED}0)${NC} Exit\n"
 
   if [ ! -t 0 ] && ! (exec < /dev/tty) 2>/dev/null; then
-    echo -e "${YELLOW}Non-interactive shell detected. Use --help to view CLI options.${NC}"
+    echo -e "${YELLOW}Non-interactive shell detected. Starting zero-touch Panel installation...${NC}"
+    AUTO_CONFIRM=true
+    install_panel
     exit 0
   fi
 

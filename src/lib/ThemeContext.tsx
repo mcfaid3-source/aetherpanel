@@ -1,10 +1,18 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { THEME_PRESETS, FONT_OPTIONS, ThemePreset, FontOption } from './theme';
-import { CustomThemeSettings } from '../types';
+import { AdminSectionBackgroundSettings, CustomThemeSettings } from '../types';
 import { apiRequest } from './api';
 
 export type AccentColor = 'amber' | 'emerald' | 'cyan' | 'violet' | 'rose' | 'blue';
 export type ThemeMode = 'dark' | 'light';
+
+export const DEFAULT_ADMIN_SECTION_BACKGROUND: AdminSectionBackgroundSettings = {
+  enabled: false,
+  imageUrl: '',
+  blur: '8px',
+  overlayOpacity: 75,
+  presetId: 'none'
+};
 
 interface ThemeContextType {
   theme: ThemeMode;
@@ -38,6 +46,10 @@ interface ThemeContextType {
   setBackgroundOverlayOpacity: (opacity: number) => void;
   setThemeAssets: (assets: Partial<ThemeContextType['themeAssets']>) => void;
   applySystemThemeSettings: (settings: CustomThemeSettings) => void;
+  adminSectionBackground: AdminSectionBackgroundSettings;
+  setAdminSectionBackground: (bg: AdminSectionBackgroundSettings) => void;
+  refreshAdminSectionBackground: () => Promise<void>;
+  resetAdminSectionBackground: () => void;
   accentClasses: {
     text: string;
     bg: string;
@@ -99,6 +111,31 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const val = localStorage.getItem('aether_background_overlay_opacity');
     return val !== null ? parseInt(val) : 75;
   });
+  const [adminSectionBackground, setAdminSectionBackgroundState] = useState<AdminSectionBackgroundSettings>(
+    DEFAULT_ADMIN_SECTION_BACKGROUND
+  );
+
+  const setAdminSectionBackground = useCallback((bg: AdminSectionBackgroundSettings) => {
+    setAdminSectionBackgroundState(bg);
+  }, []);
+
+  const resetAdminSectionBackground = useCallback(() => {
+    setAdminSectionBackgroundState(DEFAULT_ADMIN_SECTION_BACKGROUND);
+  }, []);
+
+  const refreshAdminSectionBackground = useCallback(async () => {
+    try {
+      const res = await apiRequest<AdminSectionBackgroundSettings>('/admin/section-background');
+      if (res.success && res.data) {
+        setAdminSectionBackgroundState({
+          ...DEFAULT_ADMIN_SECTION_BACKGROUND,
+          ...res.data
+        });
+      }
+    } catch {
+      // Keep default/current state on failure
+    }
+  }, []);
 
   // Load system theme settings on initial boot from public endpoint
   useEffect(() => {
@@ -409,6 +446,10 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         setBackgroundOverlayOpacity,
         setThemeAssets,
         applySystemThemeSettings,
+        adminSectionBackground,
+        setAdminSectionBackground,
+        refreshAdminSectionBackground,
+        resetAdminSectionBackground,
         accentClasses: getAccentClasses()
       }}
     >

@@ -2292,6 +2292,101 @@ router.put('/theme-settings', async (req: AuthenticatedRequest, res: Response) =
   });
 });
 
+const adminSectionBackgroundSchema = z.object({
+  enabled: z.boolean(),
+  imageUrl: z
+    .string()
+    .trim()
+    .max(2048)
+    .refine(
+      (val) =>
+        val === '' ||
+        val.startsWith('/') ||
+        /^https?:\/\/.+/i.test(val),
+      { message: 'Image URL must be empty, a local /path, or a valid http(s):// URL' }
+    ),
+  blur: z.enum(['none', '4px', '8px', '12px', '20px', '32px']),
+  overlayOpacity: z.number().int().min(0).max(95),
+  presetId: z.string().trim().max(64).optional()
+});
+
+// GET /api/v1/admin/section-background - Admin-only background for the Admin section
+router.get('/section-background', async (req: AuthenticatedRequest, res: Response) => {
+  if (req.user?.role !== 'admin' && req.user?.role !== 'super_admin') {
+    return res.status(403).json({
+      success: false,
+      error: { code: 'FORBIDDEN', message: 'Administrator role required to view admin section background settings.' }
+    });
+  }
+
+  const db = await getDb();
+  const defaults = {
+    enabled: false,
+    imageUrl: '',
+    blur: '8px' as const,
+    overlayOpacity: 75,
+    presetId: 'none'
+  };
+
+  const current = {
+    ...defaults,
+    ...(db.settings.adminSectionBackground || {})
+  };
+
+  res.json({
+    success: true,
+    data: current
+  });
+});
+
+// PUT /api/v1/admin/section-background - Update Admin-only background for the Admin section
+router.put('/section-background', async (req: AuthenticatedRequest, res: Response) => {
+  if (req.user?.role !== 'admin' && req.user?.role !== 'super_admin') {
+    return res.status(403).json({
+      success: false,
+      error: { code: 'FORBIDDEN', message: 'Administrator role required to modify admin section background settings.' }
+    });
+  }
+
+  const parsed = adminSectionBackgroundSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({
+      success: false,
+      error: {
+        code: 'INVALID_PAYLOAD',
+        message: parsed.error.issues[0]?.message || 'Invalid admin section background configuration.'
+      }
+    });
+  }
+
+  const db = await getDb();
+  const nextSettings = {
+    enabled: parsed.data.enabled,
+    imageUrl: parsed.data.imageUrl,
+    blur: parsed.data.blur,
+    overlayOpacity: parsed.data.overlayOpacity,
+    presetId: parsed.data.presetId || (parsed.data.imageUrl ? 'custom' : 'none')
+  };
+
+  db.settings.adminSectionBackground = nextSettings;
+  saveDbSync();
+
+  await createAuditLog(
+    req.user.id,
+    req.user.email,
+    req.user.role,
+    'ADMIN_UPDATE_SECTION_BACKGROUND',
+    'APPEARANCE',
+    `Updated admin-section background (enabled=${nextSettings.enabled}, preset=${nextSettings.presetId}, blur=${nextSettings.blur}, overlay=${nextSettings.overlayOpacity}%)`
+  );
+
+  res.json({
+    success: true,
+    message: 'Admin section background updated successfully.',
+    data: nextSettings
+  });
+});
+
 // --- PANEL VERSION & AUTOMATED UPDATE PIPELINE ---
 // GET /api/v1/admin/version - Get system version and runtime metadata
 router.get('/version', async (req: AuthenticatedRequest, res: Response) => {

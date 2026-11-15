@@ -6,6 +6,7 @@ import {
   Key, Scale, ArrowLeft, LogOut, UserPlus, PlusCircle
 } from 'lucide-react';
 import { useAuth } from '../lib/AuthContext';
+import { useTheme } from '../lib/ThemeContext';
 
 interface AdminSidebarProps {
   currentPage: string;
@@ -14,6 +15,12 @@ interface AdminSidebarProps {
 
 export const AdminSidebar: React.FC<AdminSidebarProps> = ({ currentPage, onNavigate }) => {
   const { user, logout } = useAuth();
+  const { adminSectionBackground } = useTheme();
+  const isStrictAdmin = user?.role === 'admin' || user?.role === 'super_admin';
+  const hasAdminBackdrop =
+    isStrictAdmin &&
+    adminSectionBackground.enabled &&
+    adminSectionBackground.imageUrl.trim().length > 0;
 
   const adminCoreItems = [
     { page: 'admin-dashboard', label: 'Overview', icon: Sliders },
@@ -46,7 +53,9 @@ export const AdminSidebar: React.FC<AdminSidebarProps> = ({ currentPage, onNavig
   return (
     <aside
       id="aether-sidebar"
-      className="hidden lg:flex w-64 flex-none border-r border-[#181920] bg-[#09090b] flex-col h-full select-none z-20"
+      className={`hidden lg:flex w-64 flex-none border-r border-[#181920] flex-col h-full select-none z-20 ${
+        hasAdminBackdrop ? 'bg-[#09090b]/85 backdrop-blur-md' : 'bg-[#09090b]'
+      }`}
     >
       {/* Navigation Sections */}
       <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-5">

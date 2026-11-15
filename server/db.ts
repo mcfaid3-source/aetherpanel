@@ -1262,6 +1262,16 @@ export async function getDb(reload = false): Promise<DatabaseSchema> {
           };
         }
 
+        if (!dbCache.settings.adminSectionBackground) {
+          dbCache.settings.adminSectionBackground = {
+            enabled: false,
+            imageUrl: '',
+            blur: '8px',
+            overlayOpacity: 75,
+            presetId: 'none'
+          };
+        }
+
         if (!dbCache.settings.socialLinks) {
           dbCache.settings.socialLinks = {
             discord: dbCache.settings.discordUrl || 'https://discord.gg/aetherpanel',
@@ -1985,6 +1995,13 @@ async function generateInitialDb(): Promise<DatabaseSchema> {
         bannerUrl: '',
         loginBgUrl: ''
       }
+    },
+    adminSectionBackground: {
+      enabled: false,
+      imageUrl: '',
+      blur: '8px',
+      overlayOpacity: 75,
+      presetId: 'none'
     }
   };
 

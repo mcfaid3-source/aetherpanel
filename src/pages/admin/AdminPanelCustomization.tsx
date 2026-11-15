@@ -4,15 +4,18 @@ import {
   Layout, HelpCircle, HardDrive, Search, Mail, Lock, AlertTriangle,
   Download, Upload, RotateCcw, Save, CheckCircle2, RefreshCw, Plus,
   Trash2, Edit3, Send, Check, ExternalLink, Globe, Server, Terminal,
-  Sliders, ChevronRight, X, AlertCircle
+  Sliders, ChevronRight, X, AlertCircle, Image as ImageIcon
 } from 'lucide-react';
 import { apiRequest } from '../../lib/api';
+import { useAuth } from '../../lib/AuthContext';
 import { useTheme } from '../../lib/ThemeContext';
 import { FONT_OPTIONS, THEME_PRESETS } from '../../lib/theme';
+import { AdminSectionBackgroundCard } from '../../components/admin/AdminSectionBackgroundCard';
 
 type TabKey =
   | 'branding'
   | 'theme'
+  | 'admin_bg'
   | 'hero'
   | 'cursor'
   | 'features'
@@ -35,6 +38,8 @@ interface FaqItem {
 }
 
 export const AdminPanelCustomization: React.FC = () => {
+  const { user } = useAuth();
+  const isStrictAdmin = user?.role === 'admin' || user?.role === 'super_admin';
   const [activeTab, setActiveTab] = useState<TabKey>('branding');
   const { activeFontId, setActiveFontId } = useTheme();
   const [loading, setLoading] = useState(true);
@@ -336,6 +341,9 @@ export const AdminPanelCustomization: React.FC = () => {
   const subTabs: { key: TabKey; label: string; icon: React.FC<any>; description: string }[] = [
     { key: 'branding', label: 'Branding & Identity', icon: Globe, description: 'Brand name, logo, links & currency' },
     { key: 'theme', label: 'Theme & Accent', icon: Palette, description: 'Orange palette, contrast & radius' },
+    ...(isStrictAdmin
+      ? [{ key: 'admin_bg' as TabKey, label: 'Admin Background', icon: ImageIcon, description: 'Admin-only section wallpaper & blur' }]
+      : []),
     { key: 'hero', label: 'Rotating Hero', icon: Sparkles, description: 'Service carousel & orihost-style slides' },
     { key: 'cursor', label: 'Custom Cursor', icon: MousePointer, description: 'Orange arrow cursor & pointer toggle' },
     { key: 'features', label: 'Feature Toggles', icon: SlidersHorizontal, description: 'Registration, tickets, AFK & backups' },
@@ -668,6 +676,41 @@ export const AdminPanelCustomization: React.FC = () => {
                   })}
                 </div>
               </div>
+
+              {isStrictAdmin && (
+                <div className="p-4 rounded-lg bg-[var(--color-surface-2)] border border-[var(--color-line)] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="space-y-0.5">
+                    <div className="flex items-center gap-2 text-xs font-semibold text-[var(--color-ink)]">
+                      <ImageIcon className="h-3.5 w-3.5 text-[var(--color-accent)]" />
+                      <span>Admin Section Background</span>
+                    </div>
+                    <p className="text-[11px] text-[var(--color-ink-mute)]">
+                      Set a custom backdrop visible only to administrators inside the Admin section.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('admin_bg')}
+                    className="btn btn-ghost text-xs h-8 px-3 border border-[var(--color-line)] whitespace-nowrap shrink-0"
+                  >
+                    <span>Configure Background</span>
+                    <ChevronRight className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* TAB 2B: ADMIN-ONLY BACKGROUND */}
+          {activeTab === 'admin_bg' && isStrictAdmin && (
+            <div className="space-y-6">
+              <div>
+                <h2 className="text-sm font-semibold text-[var(--color-ink)]">Admin Section Background</h2>
+                <p className="text-xs text-[var(--color-ink-mute)] mt-0.5">
+                  Customize the workspace backdrop exclusively inside the Admin section for administrator accounts.
+                </p>
+              </div>
+              <AdminSectionBackgroundCard />
             </div>
           )}
 

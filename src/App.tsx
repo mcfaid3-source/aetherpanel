@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { AuthProvider, useAuth } from './lib/AuthContext';
-import { ThemeProvider } from './lib/ThemeContext';
+import { ThemeProvider, useTheme } from './lib/ThemeContext';
 import { BrandingProvider, useBranding } from './lib/BrandingContext';
 import { ToastProvider } from './lib/ToastContext';
 import { AnimationProvider, useAnimation } from './lib/AnimationContext';
@@ -79,6 +79,7 @@ function AppContent() {
   const { user, loading, logout } = useAuth();
   const { brandName, maintenanceMode, maintenanceMessage, refreshBranding } = useBranding();
   const { settings, getTransitionProps, motionEnabled } = useAnimation();
+  const { refreshAdminSectionBackground, resetAdminSectionBackground } = useTheme();
   
   const [checkingMaintenance, setCheckingMaintenance] = useState(false);
   const [isInitialPanelMount, setIsInitialPanelMount] = useState(true);
@@ -176,6 +177,15 @@ function AppContent() {
       setUserServers([]);
     }
   }, [user]);
+
+  // Fetch admin-only background configuration strictly when logged in as admin/super_admin
+  useEffect(() => {
+    if (user && (user.role === 'admin' || user.role === 'super_admin')) {
+      refreshAdminSectionBackground();
+    } else {
+      resetAdminSectionBackground();
+    }
+  }, [user?.id, user?.role, refreshAdminSectionBackground, resetAdminSectionBackground]);
 
   // Route & Auth guard checks without resetting requested route
   useEffect(() => {
@@ -275,10 +285,11 @@ function AppContent() {
 
   // Authenticated Panel Viewport & Sidebar Layout (PRD Section 6 CSS contract)
   if (user && !isPublicPage) {
+    const canViewAdminBackground = isAdminPage && (user.role === 'admin' || user.role === 'super_admin');
     return (
       <div className="h-[100dvh] w-full overflow-hidden bg-[#09090b] text-zinc-100 flex flex-col font-sans selection:bg-amber-500 selection:text-black relative">
         {/* Authoritative Global Background System */}
-        <GlobalBackground isPanel={true} />
+        <GlobalBackground isPanel={true} isAdminSection={canViewAdminBackground} />
 
         {/* Maintenance Mode Warning Banner */}
         {maintenanceMode && (

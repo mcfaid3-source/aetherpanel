@@ -711,7 +711,7 @@ adminNodesRouter.post('/nodes/:id/install-token', async (req: AuthenticatedReque
     const protocol = req.protocol;
     const host = req.get('host');
     const panelUrl = `${protocol}://${host}`;
-    const installCmd = `bash <(curl -fsSL https://raw.githubusercontent.com/mrrangerxd/aetherpanel/refs/heads/main/install.sh) --node --token ${tokenStr} --panel ${panelUrl}`;
+    const installCmd = `bash <(curl -fsSL https://raw.githubusercontent.com/mcfaid3-source/aetherpanel/main/install.sh) --node --token ${tokenStr} --panel ${panelUrl}`;
 
     res.json({
       success: true,

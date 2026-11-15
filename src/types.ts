@@ -696,6 +696,14 @@ export interface CustomThemeSettings {
   backgroundOverlayOpacity?: number; // 0 to 100 percentage
 }
 
+export interface AdminSectionBackgroundSettings {
+  enabled: boolean;
+  imageUrl: string;
+  blur: 'none' | '4px' | '8px' | '12px' | '20px' | '32px';
+  overlayOpacity: number; // 0 to 95 percentage
+  presetId?: string;
+}
+
 export interface AntiAbuseSettings {
   enabled: boolean;
   provider: 'proxycheck' | 'ipqualityscore' | 'custom';
@@ -770,6 +778,7 @@ export interface SystemSettings {
   discordSettings?: DiscordBotSettings;
   authProviders?: AuthProviderSettings;
   themeSettings?: CustomThemeSettings;
+  adminSectionBackground?: AdminSectionBackgroundSettings;
   antiAbuse?: AntiAbuseSettings;
   pageAnimationsEnabled?: boolean;
   animationSettings?: AnimationSettings;
